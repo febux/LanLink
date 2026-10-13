@@ -11,6 +11,16 @@ VERSION="${LANLINK_VERSION:-0.1.0}"
 OUT="${1:-dist/macos/out}"
 PKGROOT="dist/macos/root"
 
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "ERROR: macOS .pkg builds must run on macOS (pkgbuild is not available here)" >&2
+  exit 1
+fi
+
+if ! command -v pkgbuild >/dev/null 2>&1; then
+  echo "ERROR: pkgbuild is required. Install with: xcode-select --install" >&2
+  exit 1
+fi
+
 echo "==> building release binaries (macOS universal recommended: build per-arch and lipo)"
 cargo build --release -p lanlinkd -p lanlinkctl -p lanlink-relay -p coordinator
 

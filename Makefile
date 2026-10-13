@@ -52,5 +52,8 @@ dist-pkg:
 dist-publish:
 	bash dist/publish-release.sh $(VERSION) $(PUBLISH_OPTS)
 
+dist-publish-ci:
+	CI_PUBLISH=1 bash dist/publish-release.sh $(VERSION) $(PUBLISH_OPTS)
+
 dist-clean:
 	rm -rf dist/deb/root dist/deb/out dist/macos/root dist/macos/out dist/windows/out dist/windows/stage dist/rpm/out

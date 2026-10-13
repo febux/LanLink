@@ -25,14 +25,16 @@ mkdir -p "${OUT}"
 
 build_native() {
     echo "[rpm] building with native rpmbuild"
-    mkdir -p "${OUT}/rpmbuild"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-    tar czf "${OUT}/rpmbuild/SOURCES/lanlink-${VERSION}.tar.gz" \
+    local topdir
+    topdir="$(cd "${OUT}" && pwd)/rpmbuild"
+    mkdir -p "${topdir}"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+    tar czf "${topdir}/SOURCES/lanlink-${VERSION}.tar.gz" \
         --transform "s,^$(basename "${REPO_DIR}"),lanlink," \
         --exclude='.git' --exclude='target' --exclude='dist/*/root' --exclude='dist/*/out' \
         -C "${REPO_DIR}/.." "$(basename "${REPO_DIR}")"
-    cp "${SPEC_DIR}/lanlink.spec" "${OUT}/rpmbuild/SPECS/"
-    rpmbuild --define "_topdir ${OUT}/rpmbuild" -ba "${OUT}/rpmbuild/SPECS/lanlink.spec"
-    find "${OUT}/rpmbuild/RPMS" -name "lanlink-*.rpm" \
+    cp "${SPEC_DIR}/lanlink.spec" "${topdir}/SPECS/"
+    rpmbuild --define "_topdir ${topdir}" -ba "${topdir}/SPECS/lanlink.spec"
+    find "${topdir}/RPMS" -name "lanlink-*.rpm" \
         ! -name "*-debuginfo-*" ! -name "*-debugsource-*" \
         -exec cp {} "${OUT}/" \;
 }

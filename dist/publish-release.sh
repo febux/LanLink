@@ -249,6 +249,12 @@ if [ "$SKIP_TAG" = 0 ]; then
   git push origin "${TAG}"
 fi
 
+# When CI is expected to build and publish the release, we only need to push the tag.
+if [ "${CI_PUBLISH:-0}" = "1" ]; then
+  echo "[publish] CI_PUBLISH=1: tag pushed; GitHub Actions will build packages and create the release."
+  exit 0
+fi
+
 # Build gh release-create args as an array so spaces in notes are preserved.
 RELEASE_ARGS=("${TAG}" --title "LanLink ${VERSION}")
 [ "$PRERELEASE" = 1 ] && RELEASE_ARGS+=(--prerelease)

@@ -302,7 +302,10 @@ async fn handle_conn(stream: tokio::net::UnixStream, state: StatusState) {
 }
 
 #[cfg(not(unix))]
-fn bind_listener(_path: &PathBuf) -> std::io::Result<tokio::net::UnixListener> {
+struct DummyListener;
+
+#[cfg(not(unix))]
+fn bind_listener(_path: &PathBuf) -> std::io::Result<DummyListener> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "status socket is not supported on this platform yet",
@@ -310,7 +313,7 @@ fn bind_listener(_path: &PathBuf) -> std::io::Result<tokio::net::UnixListener> {
 }
 
 #[cfg(not(unix))]
-async fn run_server(_listener: tokio::net::UnixListener, _path: &PathBuf, _state: StatusState) {}
+async fn run_server(_listener: DummyListener, _path: &PathBuf, _state: StatusState) {}
 
 #[cfg(test)]
 mod tests {

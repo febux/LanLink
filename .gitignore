@@ -13,5 +13,6 @@ docs/_site/
 # Distribution build artifacts
 dist/*/out/
 dist/*/root/
+dist/*/stage/
 dist/rpm/build.log
 dist/rpm/rpmbuild/
