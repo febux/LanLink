@@ -30,10 +30,12 @@
         Codepage="1252"
         InstallerVersion="500"
         UpgradeStrategy="majorUpgrade"
-        Description="LanLink virtual LAN daemon (Radmin VPN-style mesh VPN for gaming and remote access)">
+        UpgradeCode="3d6b0b6e-7d0e-4c6a-8a7e-9f1a2b3c4d5e">
 
         <MajorUpgrade DowngradeErrorMessage="A newer version of LanLink is already installed. Uninstall it first or wait for the next release." />
         <MediaTemplate EmbedCab="yes" />
+
+        <Property Id="ARPCOMMENTS" Value="LanLink virtual LAN daemon (Radmin VPN-style mesh VPN for gaming and remote access)." />
 
         <!-- Install directory: C:\Program Files\LanLink -->
         <StandardDirectory Id="ProgramFiles64Folder">

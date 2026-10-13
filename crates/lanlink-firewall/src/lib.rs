@@ -57,6 +57,7 @@ impl FirewallProfile {
     }
 
     /// Name of the nftables table used for this interface.
+    #[cfg(target_os = "linux")]
     fn table_name(&self) -> String {
         sanitize_table_name(&self.interface)
     }

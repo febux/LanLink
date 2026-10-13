@@ -70,7 +70,32 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-ARCH="$(dpkg --print-architecture)"
+detect_arch() {
+  if command -v dpkg >/dev/null 2>&1; then
+    dpkg --print-architecture
+    return
+  fi
+  if command -v dpkg-architecture >/dev/null 2>&1; then
+    dpkg-architecture -qDEB_BUILD_ARCH
+    return
+  fi
+  case "$(uname -m)" in
+    x86_64) echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    armv7l) echo armhf ;;
+    i*86) echo i386 ;;
+    riscv64) echo riscv64 ;;
+    ppc64le) echo ppc64el ;;
+    s390x) echo s390x ;;
+    *) echo unknown ;;
+  esac
+}
+
+ARCH="$(detect_arch)"
+if [ "${ARCH}" = "unknown" ]; then
+  echo "ERROR: cannot determine Debian architecture (install dpkg, dpkg-dev, or run on a recognized machine)" >&2
+  exit 1
+fi
 
 # LL_GUI env variable overrides flags: tui,web,desktop,all
 if [ -n "${LL_GUI:-}" ]; then
@@ -103,6 +128,11 @@ CARGO_PACKAGES=(-p lanlinkd -p lanlinkctl -p lanlink-relay -p coordinator)
 for bin in "${GUI_BINS[@]}"; do
   CARGO_PACKAGES+=(-p "${bin}")
 done
+
+if ! command -v dpkg-deb >/dev/null 2>&1; then
+  echo "ERROR: dpkg-deb is required to build .deb packages" >&2
+  exit 1
+fi
 
 echo "==> building release binaries"
 cargo build --release "${CARGO_PACKAGES[@]}"
@@ -166,5 +196,5 @@ EOF
 # created by the admin and picked up as lanlinkd@<name> instances.
 echo "==> building .deb"
 mkdir -p "${OUT}"
-dpkg-deb --build --root-dir "${PKGROOT}" "${OUT}/lanlink_${VERSION}-1_${ARCH}.deb"
+dpkg-deb --build "${PKGROOT}" "${OUT}/lanlink_${VERSION}-1_${ARCH}.deb"
 echo "==> wrote ${OUT}/lanlink_${VERSION}-1_${ARCH}.deb"

@@ -1,0 +1,32 @@
+name: Diagnostics
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  check-environment:
+    name: Check runner environment
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dump GitHub context
+        run: echo '${{ toJson(github) }}'
+      - name: Runner info
+        run: |
+          uname -a
+          cat /etc/os-release
+          pwd
+          ls -la
+          git log --oneline -5
+      - name: Check Docker
+        run: |
+          docker --version || true
+          docker info || true
+      - name: Check workflow file exists
+        run: |
+          ls -la .github/workflows/
+          python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml')); print('release.yml YAML OK')"

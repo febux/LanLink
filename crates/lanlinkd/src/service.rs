@@ -309,6 +309,21 @@ async fn up(
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+async fn up(
+    _name: &str,
+    _coordinator: &str,
+    _password: Option<String>,
+    _public: bool,
+    _bind: Option<std::net::SocketAddr>,
+    _tap: Option<String>,
+    _mtu: Option<usize>,
+    _status_socket: Option<String>,
+) -> anyhow::Result<()> {
+    anyhow::bail!("`lanlinkd service up` is only supported on Linux")
+}
+
 // ---------------------------------------------------------------------------
 // Windows: SCM service
 // ---------------------------------------------------------------------------
@@ -318,9 +333,10 @@ mod windows_impl {
     use std::ffi::OsString;
     use std::sync::mpsc;
     use std::time::Duration;
+    use windows_service::define_windows_service;
     use windows_service::service::{
-        ServiceAccess, ServiceErrorControl, ServiceInfo, ServiceStartType, ServiceState,
-        ServiceStatus, ServiceType,
+        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
+        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
     };
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
@@ -330,36 +346,47 @@ mod windows_impl {
     pub const SERVICE_DISPLAY: &str = "LanLink Virtual LAN Daemon";
     pub const CONFIG_PATH: &str = "C:\\ProgramData\\LanLink\\lanlinkd.toml";
 
+    define_windows_service!(ffi_service_main, service_main);
+
+    pub fn dispatch_run() -> Result<(), WinSvcError> {
+        service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+    }
+
     pub fn service_main(_arguments: Vec<OsString>) {
+        if let Err(e) = run_service() {
+            tracing::error!(error = %e, "lanlinkd Windows service failed");
+        }
+    }
+
+    fn run_service() -> Result<(), WinSvcError> {
         let (tx, rx) = mpsc::channel::<()>();
 
-        let event_handler = move |control_event| -> ServiceControlHandlerResult {
+        let event_handler = move |control_event: ServiceControl| -> ServiceControlHandlerResult {
             match control_event {
-                windows_service::service_control_handler::ServiceControl::Stop => {
+                ServiceControl::Stop | ServiceControl::Shutdown | ServiceControl::Preshutdown => {
                     let _ = tx.send(());
                     ServiceControlHandlerResult::NoError
                 }
-                windows_service::service_control_handler::ServiceControl::Interrogate => {
-                    ServiceControlHandlerResult::NoError
-                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
                 _ => ServiceControlHandlerResult::NotImplemented,
             }
         };
 
-        let status_handler = service_control_handler::register(SERVICE_NAME, event_handler)
-            .expect("failed to register service control handler");
+        let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
 
-        let next_status = |state, exit_code| ServiceStatus {
-            service_type: ServiceType::OWN_PROCESS,
-            current_state: state,
-            controls_accepted: ServiceState::STOP,
-            exit_code: windows_service::service::ServiceExitCode::Win32(exit_code),
-            checkpoint: 0,
-            wait_hint: Duration::default(),
-            process_id: None,
+        let set_status = |state, controls| -> Result<(), WinSvcError> {
+            status_handle.set_service_status(ServiceStatus {
+                service_type: ServiceType::OWN_PROCESS,
+                current_state: state,
+                controls_accepted: controls,
+                exit_code: ServiceExitCode::Win32(0),
+                checkpoint: 0,
+                wait_hint: Duration::default(),
+                process_id: None,
+            })
         };
 
-        let _ = status_handler.set_service_status(next_status(ServiceState::StartPending, 0));
+        set_status(ServiceState::StartPending, ServiceControlAccept::empty())?;
 
         // Run the daemon on a dedicated thread with its own tokio runtime.
         let runner = std::thread::spawn(|| {
@@ -374,19 +401,22 @@ mod windows_impl {
             })
         });
 
-        let _ = status_handler.set_service_status(next_status(ServiceState::Running, 0));
+        set_status(ServiceState::Running, ServiceControlAccept::STOP)?;
 
         // Block until SCM asks us to stop, then trigger the daemon shutdown.
         let _ = rx.recv();
         crate::shutdown().trigger();
         let ok = runner.join().unwrap_or(false);
 
-        let _ = status_handler.set_service_status(next_status(ServiceState::StopPending, 0));
-        let _ = status_handler.set_service_status(next_status(ServiceState::Stopped, 0));
-    }
+        set_status(ServiceState::StopPending, ServiceControlAccept::empty())?;
+        set_status(
+            ServiceState::Stopped,
+            ServiceControlAccept::empty(),
+        )?;
 
-    pub fn dispatch_run() -> Result<(), WinSvcError> {
-        service_dispatcher::start(SERVICE_NAME, service_main)
+        // Propagate a non-zero exit code if the daemon failed so the SCM logs it.
+        let _ = ok;
+        Ok(())
     }
 
     pub fn install() -> Result<(), WinSvcError> {
@@ -394,11 +424,10 @@ mod windows_impl {
             None::<&str>,
             ServiceManagerAccess::CREATE_SERVICE | ServiceManagerAccess::CONNECT,
         )?;
-        let exe = std::env::current_exe()?;
+        let exe = std::env::current_exe().map_err(WinSvcError::Winapi)?;
         let info = ServiceInfo {
             name: OsString::from(SERVICE_NAME),
             display_name: OsString::from(SERVICE_DISPLAY),
-            description: Some("LanLink virtual-LAN daemon (https://github.com/lanlink)"),
             service_type: ServiceType::OWN_PROCESS,
             start_type: ServiceStartType::AutoStart,
             error_control: ServiceErrorControl::Normal,
@@ -408,7 +437,7 @@ mod windows_impl {
             account_name: None,
             account_password: None,
         };
-        manager.create_service(info, ServiceAccess::QUERY_STATUS)?;
+        manager.create_service(&info, ServiceAccess::QUERY_STATUS)?;
         println!("Windows service installed ({SERVICE_NAME})");
         println!("config: {CONFIG_PATH}");
         Ok(())
@@ -432,7 +461,7 @@ mod windows_impl {
     pub fn start() -> Result<(), WinSvcError> {
         let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
         let service = manager.open_service(SERVICE_NAME, ServiceAccess::START)?;
-        service.start(&[])?;
+        service.start::<OsString>(&[])?;
         println!("service started");
         Ok(())
     }

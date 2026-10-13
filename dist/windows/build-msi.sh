@@ -100,7 +100,8 @@ fi
 # ---- Stage 3: MSI ----------------------------------------------------------
 MSI="${OUT_DIR}/lanlink-${VERSION}-x64.msi"
 log "building ${MSI} (version ${VERSION})..."
-wix build -arch x64 "${SCRIPT_DIR}/lanlink.wxs" \
+WIX_EULA_ID="${WIX_EULA_ID:-wix7}"
+wix build -arch x64 -acceptEula "${WIX_EULA_ID}" "${SCRIPT_DIR}/lanlink.wxs" \
     -d "Version=${VERSION}" \
     -d "BinDir=${STAGE_DIR}" \
     -o "${MSI}"
