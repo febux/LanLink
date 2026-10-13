@@ -1,0 +1,13 @@
+[package]
+name = "lanlink-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+lanlink-proto = { path = "../lanlink-proto" }

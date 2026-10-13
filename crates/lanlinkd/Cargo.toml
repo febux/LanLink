@@ -1,0 +1,35 @@
+[package]
+name = "lanlinkd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lanlinkd"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+lanlink-proto = { path = "../lanlink-proto" }
+lanlink-crypto = { path = "../lanlink-crypto" }
+lanlink-tap = { path = "../lanlink-tap" }
+lanlink-switch = { path = "../lanlink-switch" }
+lanlink-punch = { path = "../lanlink-punch" }
+lanlink-relay = { path = "../lanlink-relay" }
+lanlink-firewall = { path = "../lanlink-firewall" }
+lanlink-gateway = { path = "../lanlink-gateway" }
+toml.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"

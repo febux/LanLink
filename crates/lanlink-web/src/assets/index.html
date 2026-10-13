@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LanLink WebUI</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">◆</span>
+      <h1>LanLink</h1>
+    </div>
+    <nav>
+      <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+      <button class="nav-btn" data-tab="peers">Peers</button>
+      <button class="nav-btn" data-tab="networks">Networks</button>
+      <button class="nav-btn" data-tab="about">About</button>
+    </nav>
+    <div class="status" id="daemon-status">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-text">connecting…</span>
+    </div>
+  </header>
+
+  <main>
+    <section id="dashboard" class="tab active">
+      <h2>Dashboard</h2>
+      <div id="dashboard-empty" class="empty-state">
+        <p>No daemon status available. Start <code>lanlinkd</code> to see live data.</p>
+      </div>
+      <div id="dashboard-content" class="grid hidden">
+        <div class="card">
+          <h3>Network</h3>
+          <dl>
+            <dt>ID</dt><dd id="net-id">—</dd>
+            <dt>Assigned IP</dt><dd id="net-ip">—</dd>
+            <dt>TAP</dt><dd id="net-tap">—</dd>
+            <dt>Bind</dt><dd id="net-bind">—</dd>
+            <dt>Uptime</dt><dd id="net-uptime">—</dd>
+          </dl>
+        </div>
+        <div class="card">
+          <h3>Features</h3>
+          <dl>
+            <dt>Gateway</dt><dd id="feat-gateway">—</dd>
+            <dt>Firewall</dt><dd id="feat-firewall">—</dd>
+            <dt>Relay</dt><dd id="feat-relay">—</dd>
+          </dl>
+        </div>
+        <div class="card wide">
+          <h3>Traffic</h3>
+          <div class="stats">
+            <div><span class="label">TX</span><span id="traffic-tx" class="value">0 B</span></div>
+            <div><span class="label">RX</span><span id="traffic-rx" class="value">0 B</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="peers" class="tab">
+      <h2>Peers</h2>
+      <div id="peers-empty" class="empty-state">
+        <p>No daemon status available.</p>
+      </div>
+      <div id="peers-content" class="hidden">
+        <div class="toolbar">
+          <label>Sort by
+            <select id="peer-sort">
+              <option value="ip">IP</option>
+              <option value="latency">Latency</option>
+              <option value="traffic">Traffic</option>
+            </select>
+          </label>
+        </div>
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>IP</th>
+              <th>Latency</th>
+              <th>Path</th>
+              <th>Endpoint</th>
+              <th>Last seen</th>
+              <th>TX</th>
+              <th>RX</th>
+              <th>Gateway</th>
+            </tr>
+          </thead>
+          <tbody id="peers-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="networks" class="tab">
+      <h2>Networks</h2>
+      <div class="split">
+        <div class="panel">
+          <h3>Public directory</h3>
+          <div id="directory-empty" class="empty-state small">Loading directory…</div>
+          <table id="directory-table" class="data-table hidden">
+            <thead>
+              <tr><th>Name</th><th>ID</th><th>Subnet</th><th>Members</th><th>Type</th><th></th></tr>
+            </thead>
+            <tbody id="directory-body"></tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <h3>Create network</h3>
+          <form id="create-form" class="form">
+            <label>Name <input type="text" id="create-name" required autocomplete="off"></label>
+            <label>Password <input type="password" id="create-password" required></label>
+            <label class="inline"><input type="checkbox" id="create-public"> Public / gaming firewall</label>
+            <button type="submit">Create</button>
+          </form>
+          <div id="create-result" class="result"></div>
+
+          <h3>Join network</h3>
+          <form id="join-form" class="form">
+            <label>Network ID <input type="number" id="join-id" min="1" required></label>
+            <label>Password <input type="password" id="join-password" required></label>
+            <button type="submit">Join</button>
+          </form>
+          <div id="join-result" class="result"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="about" class="tab">
+      <h2>About</h2>
+      <p><strong>lanlink-web</strong> is a browser-based front-end for the LanLink daemon.</p>
+      <p>It shows live status from the daemon's Unix socket and forwards create/join
+      requests to the coordinator. To start the data plane, run <code>lanlinkd</code>
+      or use <code>lanlinkctl</code> on this machine.</p>
+      <ul>
+        <li>Daemon socket: auto-discovered in <code>/run/lanlink</code> or <code>/tmp</code></li>
+        <li>Coordinator: configured via <code>--coordinator</code></li>
+        <li>WebUI binds to <code>127.0.0.1:8686</code> by default</li>
+      </ul>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

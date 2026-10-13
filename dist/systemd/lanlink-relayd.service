@@ -1,0 +1,35 @@
+[Unit]
+Description=LanLink relay server (TURN-like UDP fallback)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=RUST_LOG=info
+ExecStart=/usr/bin/lanlink-relayd --listen 0.0.0.0:3478
+User=lanlink
+Group=lanlink
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+
+# --- Sandbox ---------------------------------------------------------------
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

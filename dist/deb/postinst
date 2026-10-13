@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# postinst: create the unprivileged service user and load units.
+set -e
+
+case "$1" in
+    configure)
+        if ! getent group lanlink >/dev/null; then
+            addgroup --system lanlink
+        fi
+        if ! getent passwd lanlink >/dev/null; then
+            adduser --system --ingroup lanlink --no-create-home \
+                --shell /usr/sbin/nologin lanlink
+        fi
+        # State directory for the coordinator database.
+        install -d -o lanlink -g lanlink -m 0750 /var/lib/lanlink
+        # Config directory; keep root-only writable, but let the daemon read.
+        install -d -m 0750 /etc/lanlink
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

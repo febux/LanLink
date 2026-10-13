@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+*.swp
+.DS_Store
+.idea/
+.vscode/
+docs/_site/
+/lanlinkd.toml
+/lanlink.db
+/logs/
+/tmp/

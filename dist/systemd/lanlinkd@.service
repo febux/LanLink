@@ -1,0 +1,47 @@
+[Unit]
+Description=LanLink virtual-LAN daemon (%i)
+Documentation=file:/usr/share/doc/lanlink/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+TimeoutStartSec=60
+Environment=RUST_LOG=info
+ExecStart=/usr/bin/lanlinkd run --config /etc/lanlink/%i.toml
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# --- Privilege separation -------------------------------------------------
+# Unprivileged service user with only the capabilities a VPN daemon needs.
+User=lanlink
+Group=lanlink
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+DeviceAllow=/dev/net/tun rw
+
+# --- Sandbox ---------------------------------------------------------------
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# Gateway mode writes /proc/sys/net/ipv4/ip_forward, so kernel tunables must
+# remain writable (CAP_NET_ADMIN still gates access).
+ProtectKernelTunables=no
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+NoNewPrivileges=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

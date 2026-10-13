@@ -1,0 +1,109 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <!--
+      LanLink Windows MSI (WiX v4/v5).
+
+      Build (see dist/windows/build-msi.sh for the full pipeline):
+
+        wix build -arch x64 dist/windows/lanlink.wxs \
+          -d Version=0.1.0 \
+          -d BinDir=target/x86_64-pc-windows-msvc/release \
+          -o dist/windows/out/lanlink-0.1.0-x64.msi
+
+      Contents:
+        - C:\Program Files\LanLink\lanlinkd.exe   (registers the LanLinkDaemon
+          Windows service, auto-start, LocalSystem)
+        - C:\Program Files\LanLink\lanlinkctl.exe
+        - C:\Program Files\LanLink\wintun.dll     (Wintun driver library, MIT,
+          https://www.wintun.net/)
+        - C:\ProgramData\LanLink\lanlinkd.example.toml (never overwrites an
+          existing lanlinkd.toml)
+
+      The service reads its config from C:\ProgramData\LanLink\lanlinkd.toml
+      (hardcoded in crates/lanlinkd/src/service.rs; see dist/windows/README.md).
+    -->
+    <Package
+        Name="LanLink"
+        Manufacturer="LanLink Contributors"
+        Version="$(var.Version)"
+        Scope="perMachine"
+        Language="1033"
+        Codepage="1252"
+        InstallerVersion="500"
+        UpgradeStrategy="majorUpgrade"
+        Description="LanLink virtual LAN daemon (Radmin VPN-style mesh VPN for gaming and remote access)">
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of LanLink is already installed. Uninstall it first or wait for the next release." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <!-- Install directory: C:\Program Files\LanLink -->
+        <StandardDirectory Id="ProgramFiles64Folder">
+            <Directory Name="LanLink">
+                <!-- Daemon binary + the Windows service itself.
+                     Matches SERVICE_NAME/CONFIG_PATH in service.rs. -->
+                <Component Id="LanlinkdExe" Guid="68278cc9-4999-49a0-b543-1ce12fefd9e4">
+                    <File Id="lanlinkd.exe" Source="$(var.BinDir)/lanlinkd.exe" KeyPath="yes" />
+                    <ServiceInstall
+                        Name="LanLinkDaemon"
+                        DisplayName="LanLink Virtual LAN Daemon"
+                        Description="Cross-platform layer-2 mesh VPN daemon (Radmin VPN-style). Creates the virtual Ethernet adapter and forwards encrypted frames peer-to-peer."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Vital="yes" />
+                    <ServiceControl
+                        Id="LanLinkDaemonControl"
+                        Name="LanLinkDaemon"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+                </Component>
+
+                <!-- CLI -->
+                <Component Id="LanlinkctlExe" Guid="b7537a6f-5fbd-421b-a696-fa00e9086422">
+                    <File Id="lanlinkctl.exe" Source="$(var.BinDir)/lanlinkctl.exe" KeyPath="yes" />
+                </Component>
+
+                <!-- Wintun driver library (MIT, bundled from https://www.wintun.net/).
+                     The driver itself is embedded inside the DLL and installed
+                     on first adapter creation. -->
+                <Component Id="WintunDll" Guid="fce1e4bb-cf9d-430e-83ce-ec3ed08fe53f">
+                    <File Id="wintun.dll" Source="$(var.BinDir)/wintun.dll" KeyPath="yes" />
+                </Component>
+
+                <!-- Add the install dir to the system PATH (last, non-permanent). -->
+                <Component Id="PathEnv" Guid="55e0fd95-7770-425d-ae7a-c4a3372e341c">
+                    <RegistryValue Root="HKLM"
+                                   Key="SYSTEM\CurrentControlSet\Services\LanLinkDaemon"
+                                   Name="InstallDir"
+                                   Type="string"
+                                   Value="[INSTALLDIR]"
+                                   KeyPath="yes" />
+                    <Environment Id="PathEntry" Name="PATH" Value="[INSTALLDIR]"
+                                 Permanent="no" Part="last" Action="set" System="yes" />
+                </Component>
+
+                <!-- Docs -->
+                <Component Id="Docs" Guid="71b936a3-c1f6-4407-b141-9d8680293593">
+                    <File Id="windows_readme.md" Source="dist/windows/README.md" />
+                </Component>
+            </Directory>
+        </StandardDirectory>
+
+        <!-- Config directory: C:\ProgramData\LanLink -->
+        <StandardDirectory Id="CommonAppDataFolder">
+            <Directory Name="LanLink">
+                <!-- Only ever ships the example config; an operator-edited
+                     lanlinkd.toml is never touched by install/upgrade/remove. -->
+                <Component Id="ExampleConfig" Guid="a865143b-c126-4565-93cc-5324a07b559f">
+                    <File Id="lanlinkd.example.toml"
+                          Source="dist/lanlinkd.example.toml"
+                          KeyPath="yes" />
+                </Component>
+            </Directory>
+        </StandardDirectory>
+
+        <!-- Fail fast with a readable message if the service exe goes missing. -->
+        <Property Id="ARPNOMODIFY" Value="1" />
+    </Package>
+</Wix>

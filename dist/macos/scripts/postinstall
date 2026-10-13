@@ -1,0 +1,18 @@
+#!/bin/bash
+# postinstall: load the launchd daemon.
+set -e
+
+PLIST="/Library/LaunchDaemons/com.lanlink.lanlinkd.plist"
+
+if [ ! -f /etc/lanlink/lanlink.toml ]; then
+    echo "note: create /etc/lanlink/lanlink.toml (see /etc/lanlink/lanlinkd.example.toml)"
+fi
+
+# Only load once the admin has created a config, otherwise launchd will
+# restart-loop a failing daemon.
+if [ -f /etc/lanlink/lanlink.toml ]; then
+    launchctl bootstrap system "${PLIST}" 2>/dev/null || \
+    launchctl load -w "${PLIST}" 2>/dev/null || true
+fi
+
+exit 0

@@ -1,0 +1,114 @@
+# Maintainer: LanLink Contributors <lanlink@example.com>
+# Build-time GUI selector:
+#   makepkg LL_GUI=tui      # terminal UI + unified launcher
+#   makepkg LL_GUI=web      # browser WebUI + unified launcher
+#   makepkg LL_GUI=desktop  # native desktop UI + unified launcher
+#   makepkg LL_GUI=all      # all GUI frontends + unified launcher
+#   makepkg                 # daemon, CLI, coordinator and relay only
+pkgname=lanlink-git
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Cross-platform Radmin-VPN-style layer-2 mesh VPN (daemon + CLI + coordinator + relay)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/lanlink/lanlink'
+license=('Apache-2.0')
+depends=('nftables' 'iproute2')
+makedepends=('cargo' 'git')
+optdepends=('coturn: STUN server')
+provides=('lanlink')
+conflicts=('lanlink')
+source=('lanlink::git+https://github.com/lanlink/lanlink.git')
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/lanlink"
+    git describe --long --tags 2>/dev/null | sed 's/^v//; s/-/.r/; s/-g/./' || printf '0.1.0'
+}
+
+prepare() {
+    cd "$srcdir/lanlink"
+    cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+    cd "$srcdir/lanlink"
+    export CARGO_TARGET_DIR=target
+
+    # Resolve GUI selector: tui, web, desktop, all, or empty.
+    _gui="${LL_GUI:-}"
+    _gui_bins=()
+    case "$_gui" in
+        all|ALL)
+            _gui_bins=(lanlink-tui lanlink-web lanlink-desktop lanlink-gui)
+            ;;
+        *)
+            case ",$_gui," in
+                *,tui,*) _gui_bins+=(lanlink-tui) ;;
+            esac
+            case ",$_gui," in
+                *,web,*) _gui_bins+=(lanlink-web) ;;
+            esac
+            case ",$_gui," in
+                *,desktop,*) _gui_bins+=(lanlink-desktop) ;;
+            esac
+            [ "${#_gui_bins[@]}" -gt 0 ] && _gui_bins+=(lanlink-gui)
+            ;;
+    esac
+
+    _pkgs=(-p lanlinkd -p lanlinkctl -p lanlink-relay -p coordinator)
+    for _bin in "${_gui_bins[@]}"; do
+        _pkgs+=(-p "$_bin")
+    done
+
+    cargo build --frozen --release "${_pkgs[@]}"
+}
+
+check() {
+    cd "$srcdir/lanlink"
+    cargo test --frozen --workspace
+}
+
+package() {
+    cd "$srcdir/lanlink"
+
+    for bin in lanlinkd lanlinkctl lanlink-relayd lanlink-coordinator; do
+        install -Dm0755 "target/release/${bin}" "${pkgdir}/usr/bin/${bin}"
+    done
+
+    # Install selected GUI binaries if they were built.
+    _gui="${LL_GUI:-}"
+    _gui_bins=()
+    case "$_gui" in
+        all|ALL)
+            _gui_bins=(lanlink-tui lanlink-web lanlink-desktop lanlink-gui)
+            ;;
+        *)
+            case ",$_gui," in
+                *,tui,*) _gui_bins+=(lanlink-tui) ;;
+            esac
+            case ",$_gui," in
+                *,web,*) _gui_bins+=(lanlink-web) ;;
+            esac
+            case ",$_gui," in
+                *,desktop,*) _gui_bins+=(lanlink-desktop) ;;
+            esac
+            [ "${#_gui_bins[@]}" -gt 0 ] && _gui_bins+=(lanlink-gui)
+            ;;
+    esac
+    for bin in "${_gui_bins[@]}"; do
+        install -Dm0755 "target/release/${bin}" "${pkgdir}/usr/bin/${bin}"
+    done
+
+    install -Dm0644 dist/systemd/lanlinkd@.service "${pkgdir}/usr/lib/systemd/system/lanlinkd@.service"
+    install -Dm0644 dist/systemd/lanlink-coordinator.service "${pkgdir}/usr/lib/systemd/system/lanlink-coordinator.service"
+    install -Dm0644 dist/systemd/lanlink-relayd.service "${pkgdir}/usr/lib/systemd/system/lanlink-relayd.service"
+    install -Dm0644 dist/lanlinkd.example.toml "${pkgdir}/etc/lanlink/lanlinkd.example.toml"
+    install -Dm0644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+
+    # systemd sysusers
+    install -Dm0644 /dev/null "${pkgdir}/usr/lib/sysusers.d/lanlink.conf"
+    echo 'u lanlink - "LanLink daemon" -' > "${pkgdir}/usr/lib/sysusers.d/lanlink.conf"
+    # tmpfiles for state dir
+    echo 'd /var/lib/lanlink 0750 lanlink lanlink -' > "${pkgdir}/usr/lib/tmpfiles.d/lanlink.conf"
+    install -Dm0644 /dev/null "${pkgdir}/usr/lib/tmpfiles.d/lanlink.conf"
+}

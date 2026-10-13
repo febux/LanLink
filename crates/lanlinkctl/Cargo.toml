@@ -1,0 +1,23 @@
+[package]
+name = "lanlinkctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "lanlinkctl"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+clap.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+rand.workspace = true
+base64.workspace = true
+anyhow.workspace = true
+lanlink-proto = { path = "../lanlink-proto" }

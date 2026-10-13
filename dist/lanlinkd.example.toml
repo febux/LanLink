@@ -1,0 +1,48 @@
+# LanLink daemon configuration.
+#
+# Copy to /etc/lanlink/<name>.toml (one file per network) and run:
+#   lanlinkd service start <name>
+#
+# Secrets: prefer `password_file` over `password`; the file should contain
+# the password on its first line and be owned by root with mode 0600.
+
+[network]
+# Coordinator base URL.
+coordinator = "http://localhost:8080"
+
+# Network id (as shown by `lanlinkctl coord create`).
+network_id = 1
+
+# Either `password` or `password_file` is required.
+#password = "change-me"
+password_file = "/etc/lanlink/network.secret"
+
+# UDP socket to listen on; also advertised to peers as a direct candidate.
+bind = "0.0.0.0:9000"
+
+# Virtual NIC name (must be unique per network on this node).
+tap = "lanlink0"
+
+# Virtual NIC MTU. 1400 leaves headroom for encryption + outer UDP/IP.
+mtu = 1400
+
+# STUN servers used for NAT discovery. Empty = built-in defaults.
+stun_servers = []
+
+[gateway]
+# Set to true to share this node's physical LAN with the virtual network.
+enabled = false
+# Required when enabled, e.g. "192.168.1.0/24".
+shared_subnet = "192.168.1.0/24"
+# Required when enabled: the interface that reaches the shared subnet.
+phys_interface = "eth0"
+
+[telemetry]
+# Opt-in anonymized telemetry. Disabled by default. When enabled, the daemon
+# sends a small report (version, platform, peer count, relay/direct split,
+# gateway/firewall flags, byte counters) to the coordinator endpoint at the
+# interval below. No node id, network id, IP address, or traffic content is
+# included.
+enabled = false
+# endpoint = "https://coord.example.com:8080/telemetry"
+# interval_hours = 24
