@@ -14,7 +14,8 @@ url='https://github.com/lanlink/lanlink'
 license=('Apache-2.0')
 depends=('nftables' 'iproute2')
 makedepends=('cargo' 'git')
-optdepends=('coturn: STUN server')
+optdepends=('coturn: STUN server'
+            'webkit2gtk: native desktop UI (LL_GUI=desktop)')
 provides=('lanlink')
 conflicts=('lanlink')
 source=('lanlink::git+https://github.com/lanlink/lanlink.git')
@@ -65,7 +66,34 @@ build() {
 
 check() {
     cd "$srcdir/lanlink"
-    cargo test --frozen --workspace
+    # Only test the packages we actually build; the desktop frontend requires
+    # webkit2gtk and is not built unless explicitly requested.
+    _gui="${LL_GUI:-}"
+    _gui_bins=()
+    case "$_gui" in
+        all|ALL)
+            _gui_bins=(lanlink-tui lanlink-web lanlink-desktop lanlink-gui)
+            ;;
+        *)
+            case ",$_gui," in
+                *,tui,*) _gui_bins+=(lanlink-tui) ;;
+            esac
+            case ",$_gui," in
+                *,web,*) _gui_bins+=(lanlink-web) ;;
+            esac
+            case ",$_gui," in
+                *,desktop,*) _gui_bins+=(lanlink-desktop) ;;
+            esac
+            [ "${#_gui_bins[@]}" -gt 0 ] && _gui_bins+=(lanlink-gui)
+            ;;
+    esac
+
+    _pkgs=(-p lanlinkd -p lanlinkctl -p lanlink-relay -p coordinator)
+    for _bin in "${_gui_bins[@]}"; do
+        _pkgs+=(-p "$_bin")
+    done
+
+    cargo test --frozen "${_pkgs[@]}"
 }
 
 package() {
@@ -104,6 +132,7 @@ package() {
     install -Dm0644 dist/systemd/lanlink-relayd.service "${pkgdir}/usr/lib/systemd/system/lanlink-relayd.service"
     install -Dm0644 dist/lanlinkd.example.toml "${pkgdir}/etc/lanlink/lanlinkd.example.toml"
     install -Dm0644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+    install -Dm0644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 
     # systemd sysusers
     install -Dm0644 /dev/null "${pkgdir}/usr/lib/sysusers.d/lanlink.conf"

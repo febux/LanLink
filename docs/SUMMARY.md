@@ -7,3 +7,4 @@
 - [Operator Runbooks](./ops.md)
 - [Threat Model & Privacy](./threat-model.md)
 - [TUI Build Plan](./tui-plan.md)
+- [Release & Publishing](./release.md)

@@ -1,7 +1,10 @@
-.PHONY: check test fmt clippy clean run-daemon run-coordinator gui dev web dist-deb dist-msi dist-clean
+.PHONY: check test fmt clippy clean run-daemon run-coordinator gui dev web dist-deb dist-rpm dist-msi dist-pkg dist-publish dist-clean
 
 # Default GUI mode for `make gui` (tui, web, or desktop).
 MODE ?= tui
+
+# Version used by distribution builds (default: read from Cargo.toml).
+VERSION ?= $(shell awk -F'"' '/^version =/{print $$2; exit}' Cargo.toml)
 
 check:
 	cargo check --workspace
@@ -37,8 +40,17 @@ web:
 dist-deb:
 	bash dist/deb/build-deb.sh
 
+dist-rpm:
+	bash dist/rpm/build-rpm.sh
+
 dist-msi:
 	bash dist/windows/build-msi.sh
 
+dist-pkg:
+	bash dist/macos/build-pkg.sh
+
+dist-publish:
+	bash dist/publish-release.sh $(VERSION) $(PUBLISH_OPTS)
+
 dist-clean:
-	rm -rf dist/deb/root dist/deb/out dist/macos/root dist/macos/out dist/windows/out dist/windows/stage
+	rm -rf dist/deb/root dist/deb/out dist/macos/root dist/macos/out dist/windows/out dist/windows/stage dist/rpm/out

@@ -3,6 +3,10 @@
 This guide shows how to install LanLink on Linux with **one command**, picking the
 front-end you want: terminal UI (TUI), browser WebUI, or native desktop app.
 
+For maintainers, see [`dist/publish-release.sh`](../dist/publish-release.sh) or
+`make dist-publish` to build and publish all distribution packages to GitHub
+Releases in one command.
+
 ## What you get
 
 Every install method below gives you the same core binaries:

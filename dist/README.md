@@ -6,11 +6,43 @@ from the workspace root with `make` or the per-platform scripts.
 | Platform | Mechanism | Entry point |
 |---|---|---|
 | Linux (Debian/Ubuntu) | `.deb` + systemd | `dist/deb/build-deb.sh` or `make dist-deb` |
-| Linux (Fedora/RHEL) | `.rpm` + systemd | `dist/rpm/lanlink.spec` (rpmbuild) |
+| Linux (Fedora/RHEL) | `.rpm` + systemd | `dist/rpm/build-rpm.sh` or `make dist-rpm` |
 | Linux (Arch) | AUR | `dist/aur/PKGBUILD` |
-| macOS | `.pkg` + launchd | `dist/macos/build-pkg.sh` |
+| macOS | `.pkg` + launchd | `dist/macos/build-pkg.sh` or `make dist-pkg` |
 | Windows | MSI (WiX) + Windows service | `dist/windows/build-msi.sh` or `make dist-msi` |
 | Any | systemd units only | `dist/systemd/` |
+| All | GitHub Releases | `dist/publish-release.sh` or `make dist-publish` |
+
+## One-command publish to GitHub Releases
+
+```sh
+# Authenticate once with the GitHub CLI
+gh auth login
+
+# Build every package that can be built on this host and publish them
+make dist-publish VERSION=0.2.0
+
+# Dry-run: build without creating the release
+make dist-publish VERSION=0.2.0 PUBLISH_OPTS="--dry-run"
+
+# Publish already-built artifacts only
+make dist-publish VERSION=0.2.0 PUBLISH_OPTS="--skip-build"
+
+# Publish with GUI front-ends included in the .deb build
+LL_GUI=all make dist-publish VERSION=0.2.0
+```
+
+The publish script auto-detects what the current host can build:
+
+- Linux with `dpkg-deb` → `.deb`
+- Linux with `rpmbuild` or Docker/Podman → `.rpm`
+- Linux with `cargo-xwin` + WiX → `.msi`
+- macOS with `pkgbuild` → `.pkg`
+- Windows with WiX → `.msi`
+
+Missing platform toolchains are skipped with a warning. Run the script on each
+platform (or in CI matrix jobs) and re-run `make dist-publish PUBLISH_OPTS="--skip-build"` to
+collect and upload every artifact under one release.
 
 ## Building the .deb with GUI front-ends
 

@@ -9,3 +9,9 @@ docs/_site/
 /lanlink.db
 /logs/
 /tmp/
+
+# Distribution build artifacts
+dist/*/out/
+dist/*/root/
+dist/rpm/build.log
+dist/rpm/rpmbuild/

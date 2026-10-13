@@ -7,7 +7,8 @@ URL:            https://github.com/lanlink/lanlink
 Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
 Requires:       nftables iproute2
 Recommends:     coturn
-BuildRequires:  cargo rust-packaging >= 21
+BuildRequires:  cargo
+BuildRequires:  systemd-rpm-macros
 
 ExclusiveArch:  %{rust_arches}
 
@@ -21,10 +22,13 @@ This package contains the lanlinkd daemon, lanlinkctl CLI, the
 lanlink-relayd relay server and the lanlink-coordinator membership server.
 
 %prep
-%autosetup -n %{name}-%{version}
+%autosetup -n lanlink
 
 %build
-cargo build --release --workspace --frozen
+# Build only the daemon/core binaries. The GUI front-ends (Tauri/Web/TUI)
+# are packaged separately via dist/deb/build-deb.sh and dist/aur/PKGBUILD.
+cargo fetch --locked --target %{_arch}-unknown-linux-gnu
+cargo build --release --frozen -p lanlinkd -p lanlinkctl -p lanlink-relay -p coordinator
 
 %install
 install -D -m 0755 target/release/lanlinkd %{buildroot}%{_bindir}/lanlinkd
