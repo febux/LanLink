@@ -2,7 +2,7 @@
 # One-line installer for LanLink on Linux.
 #
 # Install the latest release:
-#   curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/febux/LanLink/master/dist/install.sh | sh
 #
 # With options:
 #   curl -fsSL ... | sh -s -- --gui desktop --channel stable
@@ -21,7 +21,7 @@
 # and (when using native packages) the lanlink system user.
 set -euo pipefail
 
-REPO="${LANLINK_REPO:-lanlink/lanlink}"
+REPO="${LANLINK_REPO:-febux/LanLink}"
 DEFAULT_DIR="/usr/local"
 DEFAULT_CHANNEL="stable"
 DEFAULT_GUI="desktop"

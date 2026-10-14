@@ -1,7 +1,7 @@
 # One-line installer for LanLink on Windows.
 #
 # Run in an elevated PowerShell:
-#   irm https://raw.githubusercontent.com/lanlink/lanlink/main/dist/windows/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/febux/LanLink/master/dist/windows/install.ps1 | iex
 #
 # Parameters (via environment variables because iex can't pass args cleanly):
 #   $env:LANLINK_VERSION = "0.3.1"   # default: latest release
@@ -15,7 +15,7 @@ param(
 )
 
 $Repo = $env:LANLINK_REPO
-if (-not $Repo) { $Repo = "lanlink/lanlink" }
+if (-not $Repo) { $Repo = "febux/LanLink" }
 if (-not $Gui) { $Gui = "desktop" }
 
 function Die($msg) {

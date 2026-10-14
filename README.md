@@ -92,7 +92,7 @@ lanlink/
 ### Linux — one command
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/febux/LanLink/master/dist/install.sh | sh
 LANLINK_PASSWORD=hunter2 sudo -E lanlinkd service up gaming-night
 lanlink-desktop
 ```
@@ -102,7 +102,7 @@ lanlink-desktop
 Run in an **elevated PowerShell**:
 
 ```powershell
-irm https://raw.githubusercontent.com/lanlink/lanlink/main/dist/windows/install.ps1 | iex
+irm https://raw.githubusercontent.com/febux/LanLink/master/dist/windows/install.ps1 | iex
 lanlinkd service up --name gaming-night --password hunter2
 ```
 

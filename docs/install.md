@@ -33,13 +33,13 @@ You can optionally include one or more GUI front-ends:
 
 ```bash
 # Native desktop app (default)
-curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/febux/LanLink/master/dist/install.sh | sh
 
 # Terminal UI
-curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh -s -- --gui tui
+curl -fsSL https://raw.githubusercontent.com/febux/LanLink/master/dist/install.sh | sh -s -- --gui tui
 
 # Browser WebUI
-curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh -s -- --gui web
+curl -fsSL https://raw.githubusercontent.com/febux/LanLink/master/dist/install.sh | sh -s -- --gui web
 
 # Pick a different package format
 curl -fsSL ... | sh -s -- --pkg deb       # Debian/Ubuntu (default on apt systems)
@@ -55,7 +55,7 @@ curl -fsSL ... | sh -s -- --pkg snap      # Snap package
 Run in an **elevated PowerShell**:
 
 ```powershell
-irm https://raw.githubusercontent.com/lanlink/lanlink/main/dist/windows/install.ps1 | iex
+irm https://raw.githubusercontent.com/febux/LanLink/master/dist/windows/install.ps1 | iex
 ```
 
 Then create or join a network:
