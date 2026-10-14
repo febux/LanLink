@@ -11,6 +11,10 @@ WatchdogSec=30
 TimeoutStartSec=60
 Environment=RUST_LOG=info
 ExecStart=/usr/bin/lanlinkd run --config /etc/lanlink/%i.toml
+RuntimeDirectory=lanlink
+RuntimeDirectoryMode=0775
+# Add the desktop user to the lanlink group so frontends can discover/connect.
+# The status socket itself is created mode 0660 by the daemon.
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGTERM

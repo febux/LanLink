@@ -169,6 +169,12 @@ for unit in systemd/*; do
 done
 useradd -r -s /usr/sbin/nologin -M lanlink 2>/dev/null || true
 groupadd -r lanlink 2>/dev/null || true
+# Add the invoking user to the lanlink group so frontends can reach the daemon socket.
+if [ -n "${SUDO_USER:-}" ]; then
+  usermod -aG lanlink "${SUDO_USER}" 2>/dev/null || true
+elif [ "$(id -u)" -ne 0 ]; then
+  usermod -aG lanlink "$(id -un)" 2>/dev/null || true
+fi
 install -d -m 0750 /etc/lanlink
 chown root:lanlink /etc/lanlink
 cp -n share/doc/lanlinkd.example.toml /etc/lanlink/ 2>/dev/null || true
@@ -177,6 +183,7 @@ chmod 0640 /etc/lanlink/lanlinkd.example.toml 2>/dev/null || true
 systemctl daemon-reload
 echo "LanLink installed to ${PREFIX}/bin"
 echo "Next: lanlinkd service up <network-name>"
+echo "NOTE: log out and back in (or run 'newgrp lanlink') for GUI frontends to access the daemon status socket"
 EOF
 chmod 0755 "${STAGE}/lanlink-${VERSION}-${ARCH}/install-local.sh"
 

@@ -210,6 +210,14 @@ install_tarball() {
   run useradd -r -s /usr/sbin/nologin -M lanlink 2>/dev/null || true
   run groupadd -r lanlink 2>/dev/null || true
 
+  # Add the invoking user to the lanlink group so desktop/TUI/Web frontends can
+  # discover and connect to the daemon status socket under /run/lanlink.
+  if [ -n "${SUDO_USER:-}" ]; then
+    run usermod -aG lanlink "${SUDO_USER}"
+  elif [ "$(id -u)" -ne 0 ]; then
+    run usermod -aG lanlink "$(id -un)"
+  fi
+
   # Install binaries and units.
   run install -d -m 0755 "${INSTALL_DIR}/bin"
   for bin in "${extracted}"/bin/*; do
@@ -234,6 +242,7 @@ install_tarball() {
 
   run systemctl daemon-reload
   log "installed to ${INSTALL_DIR}/bin"
+  log "NOTE: log out and back in (or run 'newgrp lanlink') for GUI frontends to access the daemon status socket"
 }
 
 install_appimage() {
