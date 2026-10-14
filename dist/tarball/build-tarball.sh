@@ -37,7 +37,7 @@ STAGE="${SCRIPT_DIR}/stage"
 
 TARGET="${TARGET:-$(rustc -vV | sed -n 's/^host: //p')}"
 MUSL="${MUSL:-0}"
-LL_GUI="${LL_GUI:-all}"
+LL_GUI="${LL_GUI-all}"
 
 log() { printf '[tarball] %s\n' "$*"; }
 die() { printf '[tarball] ERROR: %s\n' "$*" >&2; exit 1; }

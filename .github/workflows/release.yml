@@ -99,43 +99,6 @@ jobs:
           path: dist/macos/out/*.pkg
           if-no-files-found: error
 
-  build-tarball:
-    name: Build portable Linux tarball
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            gui: all
-          - target: aarch64-unknown-linux-gnu
-            gui: ""
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - name: Install cross-compilation and desktop build deps
-        run: |
-          sudo apt-get update
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-          fi
-          sudo apt-get install -y pkg-config libglib2.0-dev libssl-dev libwebkit2gtk-4.1-dev
-      - name: Build tarball
-        env:
-          TARGET: ${{ matrix.target }}
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          LL_GUI: ${{ matrix.gui }}
-        run: bash dist/tarball/build-tarball.sh
-      - name: Upload tarball artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lanlink-tarball-${{ matrix.target }}
-          path: dist/tarball/out/*.tar.gz
-          if-no-files-found: error
-
   build-appimage:
     name: Build AppImage
     if: startsWith(github.ref, 'refs/tags/v')
@@ -161,57 +124,10 @@ jobs:
           path: dist/appimage/out/*.AppImage
           if-no-files-found: error
 
-  build-flatpak:
-    name: Build Flatpak
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install flatpak-builder
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
-          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          sudo flatpak install -y \
-            org.gnome.Platform//46 \
-            org.gnome.Sdk//46 \
-            org.freedesktop.Sdk.Extension.rust-stable//46
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Build Flatpak
-        run: bash dist/flatpak/build-flatpak.sh
-      - name: Upload Flatpak artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lanlink-flatpak
-          path: dist/flatpak/out/*.flatpak
-          if-no-files-found: warn
-
-  build-snap:
-    name: Build Snap
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install snapcraft
-        uses: samuelmeuli/action-snapcraft@v3
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Build Snap
-        working-directory: dist/snap
-        run: |
-          sudo snapcraft --use-lxd || snapcraft --use-lxd
-      - name: Upload Snap artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lanlink-snap
-          path: dist/snap/*.snap
-          if-no-files-found: warn
-
   release:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-deb, build-rpm, build-msi, build-pkg, build-tarball, build-appimage, build-flatpak, build-snap]
+    needs: [build-deb, build-rpm, build-msi, build-pkg, build-appimage]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -224,7 +140,7 @@ jobs:
       - name: Flatten artifacts for upload
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.pkg' -o -name '*.tar.gz' -o -name '*.AppImage' -o -name '*.flatpak' -o -name '*.snap' \) -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.pkg' -o -name '*.AppImage' \) -exec cp {} release/ \;
           ls -la release/
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

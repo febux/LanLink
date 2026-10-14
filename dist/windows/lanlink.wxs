@@ -162,17 +162,17 @@
             <ComponentRef Id="Docs" />
             <ComponentRef Id="ExampleConfig" />
 
-            <Feature Id="TuiFeature" Title="Terminal UI" Level="1" AllowAdvertise="no" Condition="IncludeTui = 1">
+            <Feature Id="TuiFeature" Title="Terminal UI" Level="1" AllowAdvertise="no">
                 <ComponentRef Id="LanlinkTuiExe" />
             </Feature>
-            <Feature Id="WebFeature" Title="Browser WebUI" Level="1" AllowAdvertise="no" Condition="IncludeWeb = 1">
+            <Feature Id="WebFeature" Title="Browser WebUI" Level="1" AllowAdvertise="no">
                 <ComponentRef Id="LanlinkWebExe" />
             </Feature>
-            <Feature Id="DesktopFeature" Title="Desktop UI" Level="1" AllowAdvertise="no" Condition="IncludeDesktop = 1">
+            <Feature Id="DesktopFeature" Title="Desktop UI" Level="1" AllowAdvertise="no">
                 <ComponentRef Id="LanlinkDesktopExe" />
                 <ComponentRef Id="DesktopShortcut" />
             </Feature>
-            <Feature Id="GuiLauncherFeature" Title="Unified GUI Launcher" Level="1" AllowAdvertise="no" Condition="IncludeTui = 1 OR IncludeWeb = 1 OR IncludeDesktop = 1">
+            <Feature Id="GuiLauncherFeature" Title="Unified GUI Launcher" Level="1" AllowAdvertise="no">
                 <ComponentRef Id="LanlinkGuiExe" />
             </Feature>
         </Feature>
