@@ -164,7 +164,9 @@ UNIT_DIR="${2:-/etc/systemd/system}"
 install -d "${PREFIX}/bin"
 cp -v bin/* "${PREFIX}/bin/"
 install -d "${UNIT_DIR}"
-cp -v systemd/* "${UNIT_DIR}/"
+for unit in systemd/*; do
+  sed "s|/usr/bin/lanlink|${PREFIX}/bin/lanlink|g" "${unit}" > "${UNIT_DIR}/$(basename "${unit}")"
+done
 install -d /etc/lanlink
 cp -n share/doc/lanlinkd.example.toml /etc/lanlink/ 2>/dev/null || true
 systemctl daemon-reload
