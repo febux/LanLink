@@ -33,27 +33,38 @@ pub async fn fetch_snapshot(_path: &Path) -> anyhow::Result<StatusSnapshot> {
 /// Find a listening daemon socket when `--status-socket` was not given.
 /// Tries `/run/lanlink/lanlinkd-*.sock`, then `/tmp/lanlinkd-*.sock`, in
 /// lexical order; the first connectable socket wins.
-pub async fn discover_socket() -> Option<PathBuf> {
+///
+/// Returns `Err` when the directory exists but cannot be read — usually
+/// because the user is not in the `lanlink` group — with a helpful hint.
+pub async fn discover_socket() -> Result<Option<PathBuf>, String> {
     const DIRS: &[&str] = &["/run/lanlink", "/tmp"];
     let mut candidates: Vec<PathBuf> = Vec::new();
     for dir in DIRS {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("lanlinkd-") && name.ends_with(".sock") {
-                    candidates.push(entry.path());
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("lanlinkd-") && name.ends_with(".sock") {
+                        candidates.push(entry.path());
+                    }
                 }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(format!(
+                    "permission denied reading {dir}: add your user to the 'lanlink' group with \"sudo usermod -aG lanlink $USER\", then log out and back in (or run \"newgrp lanlink\" in this shell)"
+                ));
+            }
+            Err(_) => {}
         }
     }
     candidates.sort();
     for path in candidates {
         if probe(&path).await {
-            return Some(path);
+            return Ok(Some(path));
         }
     }
-    None
+    Ok(None)
 }
 
 #[cfg(unix)]

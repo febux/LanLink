@@ -33,30 +33,38 @@ impl DesktopState {
         }
     }
 
-    pub async fn resolve_socket(&self) -> Option<PathBuf> {
+    pub async fn resolve_socket(&self) -> Result<Option<PathBuf>, String> {
         let guard = self.status_socket.lock().await;
         if let Some(path) = guard.as_ref() {
             debug!(path = %path.display(), "using explicit status socket");
-            return Some(path.clone());
+            return Ok(Some(path.clone()));
         }
         drop(guard);
-        let found = discover_socket().await;
-        if let Some(ref path) = found {
-            info!(path = %path.display(), "auto-discovered daemon status socket");
-        } else {
-            warn!("no daemon status socket found in /run/lanlink or /tmp");
+        match discover_socket().await {
+            Ok(Some(path)) => {
+                info!(path = %path.display(), "auto-discovered daemon status socket");
+                Ok(Some(path))
+            }
+            Ok(None) => {
+                warn!("no daemon status socket found in /run/lanlink or /tmp");
+                Ok(None)
+            }
+            Err(e) => {
+                warn!(error = %e, "daemon status socket discovery failed");
+                Err(e)
+            }
         }
-        found
     }
 }
 
 /// Read the daemon status snapshot via the local Unix socket.
 #[tauri::command]
 pub async fn get_snapshot(state: State<'_, DesktopState>) -> Result<StatusSnapshot, String> {
-    let path = state
-        .resolve_socket()
-        .await
-        .ok_or_else(|| "no daemon status socket found in /run/lanlink or /tmp".to_string())?;
+    let path = match state.resolve_socket().await {
+        Ok(Some(path)) => path,
+        Ok(None) => return Err("no daemon status socket found in /run/lanlink or /tmp".to_string()),
+        Err(e) => return Err(e),
+    };
     debug!(path = %path.display(), "fetching daemon snapshot");
     fetch_snapshot(&path).await.map_err(|e| {
         warn!(path = %path.display(), error = %e, "failed to fetch daemon snapshot");
@@ -70,10 +78,10 @@ pub async fn get_snapshot(state: State<'_, DesktopState>) -> Result<StatusSnapsh
 pub async fn resolve_status_socket(
     state: State<'_, DesktopState>,
 ) -> Result<Option<String>, String> {
-    Ok(state
-        .resolve_socket()
-        .await
-        .map(|p| p.display().to_string()))
+    match state.resolve_socket().await {
+        Ok(opt) => Ok(opt.map(|p| p.display().to_string())),
+        Err(e) => Err(e),
+    }
 }
 
 /// List public networks from the coordinator directory.
@@ -178,27 +186,35 @@ async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
     }
 }
 
-async fn discover_socket() -> Option<PathBuf> {
+async fn discover_socket() -> Result<Option<PathBuf>, String> {
     const DIRS: &[&str] = &["/run/lanlink", "/tmp"];
     let mut candidates: Vec<PathBuf> = Vec::new();
     for dir in DIRS {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("lanlinkd-") && name.ends_with(".sock") {
-                    candidates.push(entry.path());
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with("lanlinkd-") && name.ends_with(".sock") {
+                        candidates.push(entry.path());
+                    }
                 }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(format!(
+                    "permission denied reading {dir}: add your user to the 'lanlink' group with \"sudo usermod -aG lanlink $USER\", then log out and back in (or run \"newgrp lanlink\" in this shell)"
+                ));
+            }
+            Err(_) => {}
         }
     }
     candidates.sort();
     for path in candidates {
         if probe(&path).await {
-            return Some(path);
+            return Ok(Some(path));
         }
     }
-    None
+    Ok(None)
 }
 
 #[cfg(unix)]

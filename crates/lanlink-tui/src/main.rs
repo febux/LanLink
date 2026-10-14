@@ -45,9 +45,11 @@ async fn main() -> anyhow::Result<()> {
 
     let socket = match args.status_socket {
         Some(path) => path,
-        None => daemon::discover_socket()
-            .await
-            .unwrap_or_else(|| PathBuf::from("/run/lanlink/lanlinkd-0.sock")),
+        None => match daemon::discover_socket().await {
+            Ok(Some(path)) => path,
+            Ok(None) => PathBuf::from("/run/lanlink/lanlinkd-0.sock"),
+            Err(e) => anyhow::bail!(e),
+        },
     };
     let socket_desc = socket.display().to_string();
 

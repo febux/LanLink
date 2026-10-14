@@ -242,7 +242,33 @@ install_tarball() {
 
   run systemctl daemon-reload
   log "installed to ${INSTALL_DIR}/bin"
-  log "NOTE: log out and back in (or run 'newgrp lanlink') for GUI frontends to access the daemon status socket"
+
+  # ---------------------------------------------------------------------------
+  # Group membership warning
+  # ---------------------------------------------------------------------------
+  local target_user=""
+  if [ -n "${SUDO_USER:-}" ]; then
+    target_user="${SUDO_USER}"
+  elif [ "$(id -u)" -ne 0 ]; then
+    target_user="$(id -un)"
+  fi
+  if [ -n "${target_user}" ]; then
+    if ! id -nG "${target_user}" 2>/dev/null | grep -qw lanlink; then
+      log ""
+      log "╔════════════════════════════════════════════════════════════════════╗"
+      log "║  ACTION REQUIRED: add user to the 'lanlink' group                 ║"
+      log "╠════════════════════════════════════════════════════════════════════╣"
+      log "║  Run:  sudo usermod -aG lanlink ${target_user}"
+      log "║  Then either:                                                      ║"
+      log "║    • log out and log back in (permanent for all apps)             ║"
+      log "║    • run:  newgrp lanlink   (temporary, current shell only)       ║"
+      log "║                                                                    ║"
+      log "║  Without this, lanlink-desktop/tui/web cannot connect to the      ║"
+      log "║  daemon status socket at /run/lanlink/lanlinkd-*.sock.            ║"
+      log "╚════════════════════════════════════════════════════════════════════╝"
+      log ""
+    fi
+  fi
 }
 
 install_appimage() {
