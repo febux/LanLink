@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "coordinator"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-crypto"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "aead",
  "anyhow",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-desktop"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2521,7 +2521,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-firewall"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "thiserror 1.0.69",
  "tokio",
@@ -2530,7 +2530,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-gateway"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "lanlink-proto",
  "thiserror 1.0.69",
@@ -2540,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-gui"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2551,7 +2551,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-proto"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -2559,7 +2559,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-punch"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "if-addrs",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-relay"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2592,7 +2592,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-switch"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "lanlink-crypto",
  "lanlink-proto",
@@ -2603,7 +2603,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-tap"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2619,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-tui"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -2635,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-web"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "lanlinkctl"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "lanlinkd"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anyhow",
  "clap",
