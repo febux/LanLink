@@ -294,6 +294,47 @@ async fn up(
     config_text.push_str(&format!("mtu = {}\n", cfg.mtu));
     std::fs::write(&config_path, config_text)?;
 
+    // Ensure the service user can read both files when invoked as root.
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::getuid() } == 0 {
+        let _ = nix::unistd::chown(
+            platform::CONFIG_DIR,
+            Some(nix::unistd::Uid::from_raw(0)),
+            Some(nix::unistd::Gid::from_raw(
+                nix::unistd::Group::from_name("lanlink")
+                    .ok()
+                    .flatten()
+                    .map(|g| g.gid.as_raw())
+                    .unwrap_or(0),
+            )),
+        );
+        let _ = std::fs::set_permissions(
+            platform::CONFIG_DIR,
+            std::fs::Permissions::from_mode(0o750),
+        );
+        for path in [&secret_path, &config_path] {
+            let _ = nix::unistd::chown(
+                (*path).as_str(),
+                Some(nix::unistd::Uid::from_raw(0)),
+                Some(nix::unistd::Gid::from_raw(
+                    nix::unistd::Group::from_name("lanlink")
+                        .ok()
+                        .flatten()
+                        .map(|g| g.gid.as_raw())
+                        .unwrap_or(0),
+                )),
+            );
+        }
+        let _ = std::fs::set_permissions(
+            &config_path,
+            std::fs::Permissions::from_mode(0o640),
+        );
+        let _ = std::fs::set_permissions(
+            &secret_path,
+            std::fs::Permissions::from_mode(0o640),
+        );
+    }
+
     tracing::info!(
         config = %config_path,
         secret = %secret_path,

@@ -31,5 +31,9 @@ lanlink-gateway = { path = "../lanlink-gateway" }
 toml.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["user", "process", "fs"] }
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
