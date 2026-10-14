@@ -45,7 +45,7 @@
 
         <!-- Install directory: C:\Program Files\LanLink -->
         <StandardDirectory Id="ProgramFiles64Folder">
-            <Directory Name="LanLink">
+            <Directory Id="INSTALLDIR" Name="LanLink">
                 <!-- Daemon binary + the Windows service itself.
                      Matches SERVICE_NAME/CONFIG_PATH in service.rs. -->
                 <Component Id="LanlinkdExe" Guid="68278cc9-4999-49a0-b543-1ce12fefd9e4">
