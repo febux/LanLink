@@ -1,4 +1,6 @@
 Name:           lanlink
+# NOTE: the build script (dist/rpm/build-rpm.sh) substitutes this with the
+# workspace version from Cargo.toml before invoking rpmbuild.
 Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Cross-platform Radmin-VPN-style virtual LAN (daemon + tools)

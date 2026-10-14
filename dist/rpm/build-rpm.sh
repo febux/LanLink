@@ -32,7 +32,8 @@ build_native() {
         --transform "s,^$(basename "${REPO_DIR}"),lanlink," \
         --exclude='.git' --exclude='target' --exclude='dist/*/root' --exclude='dist/*/out' \
         -C "${REPO_DIR}/.." "$(basename "${REPO_DIR}")"
-    cp "${SPEC_DIR}/lanlink.spec" "${topdir}/SPECS/"
+    sed -E "s/^Version:[[:space:]]+[^[:space:]]+/Version: ${VERSION}/" \
+        "${SPEC_DIR}/lanlink.spec" > "${topdir}/SPECS/lanlink.spec"
     rpmbuild --define "_topdir ${topdir}" -ba "${topdir}/SPECS/lanlink.spec"
     find "${topdir}/RPMS" -name "lanlink-*.rpm" \
         ! -name "*-debuginfo-*" ! -name "*-debugsource-*" \
@@ -57,7 +58,8 @@ build_container() {
                 --transform "s,^$(basename /src),lanlink," \
                 --exclude=.git --exclude=target --exclude="dist/*/root" --exclude="dist/*/out" \
                 -C /src/.. $(basename /src)
-            cp /src/dist/rpm/lanlink.spec /root/rpmbuild/SPECS/
+            sed -E "s/^Version:[[:space:]]+[^[:space:]]+/Version: ${LANLINK_VERSION}/" \
+                /src/dist/rpm/lanlink.spec > /root/rpmbuild/SPECS/lanlink.spec
             rpmbuild --define "_topdir /root/rpmbuild" -ba /root/rpmbuild/SPECS/lanlink.spec
             find /root/rpmbuild/RPMS -name "lanlink-*.rpm" \
                 ! -name "*-debuginfo-*" ! -name "*-debugsource-*" \
