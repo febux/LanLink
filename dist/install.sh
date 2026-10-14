@@ -206,24 +206,33 @@ install_tarball() {
   local extracted="${tmpdir}/lanlink-${VERSION}-${tarch}"
   [ -d "${extracted}" ] || die "unexpected tarball layout"
 
+  # Ensure the service user and group exist before installing files.
+  run useradd -r -s /usr/sbin/nologin -M lanlink 2>/dev/null || true
+  run groupadd -r lanlink 2>/dev/null || true
+
   # Install binaries and units.
-  run install -d "${INSTALL_DIR}/bin"
+  run install -d -m 0755 "${INSTALL_DIR}/bin"
   for bin in "${extracted}"/bin/*; do
     run install -m 0755 "${bin}" "${INSTALL_DIR}/bin/$(basename "${bin}")"
   done
 
   run install -d "/etc/systemd/system"
   for unit in "${extracted}"/systemd/*.service; do
-    run install -m 0644 "${unit}" "/etc/systemd/system/"
+    local unit_name
+    unit_name=$(basename "${unit}")
+    # Rewrite binary paths in units to match the install prefix.
+    sed "s|/usr/bin/lanlink|${INSTALL_DIR}/bin/lanlink|g" "${unit}" > "${tmpdir}/${unit_name}"
+    run install -m 0644 "${tmpdir}/${unit_name}" "/etc/systemd/system/${unit_name}"
   done
 
   run install -d -m 0750 /etc/lanlink
+  run chown root:lanlink /etc/lanlink
   if [ ! -f /etc/lanlink/lanlinkd.example.toml ]; then
-    run install -m 0644 "${extracted}/share/doc/lanlinkd.example.toml" /etc/lanlink/
+    run install -m 0640 "${extracted}/share/doc/lanlinkd.example.toml" /etc/lanlink/
+    run chown root:lanlink /etc/lanlink/lanlinkd.example.toml
   fi
 
   run systemctl daemon-reload
-  run useradd -r -s /usr/sbin/nologin -M lanlink 2>/dev/null || true
   log "installed to ${INSTALL_DIR}/bin"
 }
 

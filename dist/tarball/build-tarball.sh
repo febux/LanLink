@@ -167,10 +167,14 @@ install -d "${UNIT_DIR}"
 for unit in systemd/*; do
   sed "s|/usr/bin/lanlink|${PREFIX}/bin/lanlink|g" "${unit}" > "${UNIT_DIR}/$(basename "${unit}")"
 done
-install -d /etc/lanlink
-cp -n share/doc/lanlinkd.example.toml /etc/lanlink/ 2>/dev/null || true
-systemctl daemon-reload
 useradd -r -s /usr/sbin/nologin -M lanlink 2>/dev/null || true
+groupadd -r lanlink 2>/dev/null || true
+install -d -m 0750 /etc/lanlink
+chown root:lanlink /etc/lanlink
+cp -n share/doc/lanlinkd.example.toml /etc/lanlink/ 2>/dev/null || true
+chown root:lanlink /etc/lanlink/lanlinkd.example.toml 2>/dev/null || true
+chmod 0640 /etc/lanlink/lanlinkd.example.toml 2>/dev/null || true
+systemctl daemon-reload
 echo "LanLink installed to ${PREFIX}/bin"
 echo "Next: lanlinkd service up <network-name>"
 EOF
