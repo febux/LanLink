@@ -7,7 +7,8 @@
 # current build for development/testing.
 set -euo pipefail
 
-VERSION="${LANLINK_VERSION:-0.1.0}"
+VERSION="${LANLINK_VERSION:-$(cargo metadata --no-deps --format-version 1 2>/dev/null | sed -n 's/.*"version":"\([^"]*\)".*/\1/p' | head -1)}"
+VERSION="${VERSION:-0.1.0}"
 OUT="${1:-dist/macos/out}"
 PKGROOT="dist/macos/root"
 
