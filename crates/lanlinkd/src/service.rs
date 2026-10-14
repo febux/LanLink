@@ -309,7 +309,82 @@ async fn up(
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+async fn up(
+    name: &str,
+    coordinator: &str,
+    password: Option<String>,
+    public: bool,
+    bind: Option<std::net::SocketAddr>,
+    tap: Option<String>,
+    mtu: Option<usize>,
+    status_socket: Option<String>,
+) -> anyhow::Result<()> {
+    let password = password
+        .or_else(|| std::env::var("LANLINK_PASSWORD").ok())
+        .ok_or_else(|| anyhow::anyhow!("--password or LANLINK_PASSWORD env var is required"))?;
+
+    let cfg = crate::up::resolve_config(
+        coordinator.to_string(),
+        name.to_string(),
+        password.clone(),
+        public,
+        bind,
+        tap,
+        mtu,
+        status_socket,
+    )
+    .await?;
+
+    let config_dir = r"C:\ProgramData\LanLink";
+    let config_path = format!("{}\\lanlinkd.toml", config_dir);
+    let secret_path = format!("{}\\{}.secret", config_dir, name);
+
+    std::fs::create_dir_all(config_dir)?;
+    std::fs::write(&secret_path, password.as_bytes())?;
+
+    let mut config_text = format!(
+        "[network]\n\
+         coordinator = \"{}\"\n\
+         network_id = {}\n\
+         password_file = \"{}\"\n",
+        coordinator, cfg.network_id, secret_path
+    );
+    if let Some(b) = cfg.bind.port().checked_sub(0).map(|_| cfg.bind) {
+        config_text.push_str(&format!("bind = \"{}\"\n", b));
+    }
+    config_text.push_str(&format!("tap = \"{}\"\n", cfg.tap));
+    config_text.push_str(&format!("mtu = {}\n", cfg.mtu));
+    std::fs::write(&config_path, config_text)?;
+
+    tracing::info!(
+        config = %config_path,
+        secret = %secret_path,
+        network_id = cfg.network_id,
+        "wrote service config"
+    );
+
+    let manager = windows_service::service_manager::ServiceManager::local_computer(
+        None::<&str>,
+        windows_service::service_manager::ServiceManagerAccess::CONNECT,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to connect to SCM: {e}"))?;
+    let exists = manager
+        .open_service(
+            windows_impl::SERVICE_NAME,
+            windows_service::service::ServiceAccess::QUERY_STATUS,
+        )
+        .is_ok();
+    if !exists {
+        windows_impl::install().map_err(|e| anyhow::anyhow!("service install failed: {e}"))?;
+    }
+    windows_impl::start().map_err(|e| anyhow::anyhow!("service start failed: {e}"))?;
+    println!("started {name} with the LanLinkDaemon service");
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 #[allow(clippy::too_many_arguments)]
 async fn up(
     _name: &str,
@@ -321,7 +396,7 @@ async fn up(
     _mtu: Option<usize>,
     _status_socket: Option<String>,
 ) -> anyhow::Result<()> {
-    anyhow::bail!("`lanlinkd service up` is only supported on Linux")
+    anyhow::bail!("`lanlinkd service up` is only supported on Linux and Windows")
 }
 
 // ---------------------------------------------------------------------------
@@ -409,10 +484,7 @@ mod windows_impl {
         let ok = runner.join().unwrap_or(false);
 
         set_status(ServiceState::StopPending, ServiceControlAccept::empty())?;
-        set_status(
-            ServiceState::Stopped,
-            ServiceControlAccept::empty(),
-        )?;
+        set_status(ServiceState::Stopped, ServiceControlAccept::empty())?;
 
         // Propagate a non-zero exit code if the daemon failed so the SCM logs it.
         let _ = ok;

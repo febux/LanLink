@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=LanLink
+Comment=Cross-platform virtual LAN (Radmin VPN-style)
+Exec=lanlink-desktop
+Type=Application
+Icon=com.lanlink.LanLink
+Categories=Network;RemoteAccess;
+Terminal=false

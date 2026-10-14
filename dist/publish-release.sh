@@ -9,7 +9,7 @@
 #   --dry-run          Build everything but do not create the release or upload.
 #   --skip-build       Use already-built artifacts in dist/*/out/.
 #   --skip-tag         Do not create or push a git tag.
-#   --platforms LIST   Comma-separated: deb,rpm,pkg,msi (default: auto-detect).
+#   --platforms LIST   Comma-separated: deb,rpm,pkg,msi,tarball,appimage,flatpak,snap (default: auto-detect).
 #   --notes TEXT       Release notes (default: generated from version).
 #   --notes-file FILE  Read release notes from file.
 #   --prerelease       Mark the release as a prerelease.
@@ -108,9 +108,15 @@ ARTIFACTS=()
 if [ -z "${PLATFORMS}" ]; then
   case "$(uname -s)" in
     Linux)
-      PLATFORMS="deb,msi"
+      PLATFORMS="deb,tarball,appimage"
       if command -v rpmbuild >/dev/null 2>&1 || command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; then
-        PLATFORMS="deb,rpm,msi"
+        PLATFORMS="deb,rpm,msi,tarball,appimage"
+      fi
+      if command -v flatpak-builder >/dev/null 2>&1; then
+        PLATFORMS="${PLATFORMS},flatpak"
+      fi
+      if command -v snapcraft >/dev/null 2>&1; then
+        PLATFORMS="${PLATFORMS},snap"
       fi
       ;;
     Darwin)
@@ -197,12 +203,71 @@ build_msi() {
   done
 }
 
+build_tarball() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "[publish] SKIP tarball: cargo not found"
+    return 0
+  fi
+  echo "[publish] building Linux tarball"
+  bash "${SCRIPT_DIR}/tarball/build-tarball.sh"
+  for f in "${SCRIPT_DIR}/tarball/out"/*.tar.gz; do
+    if [ -f "$f" ]; then
+      ARTIFACTS+=("$f")
+    fi
+  done
+}
+
+build_appimage() {
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "[publish] SKIP AppImage: cargo not found"
+    return 0
+  fi
+  echo "[publish] building AppImage"
+  bash "${SCRIPT_DIR}/appimage/build-appimage.sh"
+  for f in "${SCRIPT_DIR}/appimage/out"/*.AppImage; do
+    if [ -f "$f" ]; then
+      ARTIFACTS+=("$f")
+    fi
+  done
+}
+
+build_flatpak() {
+  if ! command -v flatpak-builder >/dev/null 2>&1; then
+    echo "[publish] SKIP Flatpak: flatpak-builder not found"
+    return 0
+  fi
+  echo "[publish] building Flatpak"
+  bash "${SCRIPT_DIR}/flatpak/build-flatpak.sh"
+  for f in "${SCRIPT_DIR}/flatpak/out"/*.flatpak; do
+    if [ -f "$f" ]; then
+      ARTIFACTS+=("$f")
+    fi
+  done
+}
+
+build_snap() {
+  if ! command -v snapcraft >/dev/null 2>&1; then
+    echo "[publish] SKIP Snap: snapcraft not found"
+    return 0
+  fi
+  echo "[publish] building Snap"
+  snapcraft --use-lxd --project-dir "${SCRIPT_DIR}/snap"
+  for f in "${SCRIPT_DIR}/snap"/*.snap; do
+    if [ -f "$f" ]; then
+      ARTIFACTS+=("$f")
+    fi
+  done
+}
+
 collect_existing() {
-  local dirs=("${SCRIPT_DIR}/deb/out" "${SCRIPT_DIR}/rpm/out" "${SCRIPT_DIR}/macos/out" "${SCRIPT_DIR}/windows/out")
+  local dirs=("${SCRIPT_DIR}/deb/out" "${SCRIPT_DIR}/rpm/out" "${SCRIPT_DIR}/macos/out" "${SCRIPT_DIR}/windows/out" "${SCRIPT_DIR}/tarball/out" "${SCRIPT_DIR}/appimage/out" "${SCRIPT_DIR}/flatpak/out")
   for d in "${dirs[@]}"; do
-    for f in "$d"/*.{deb,rpm,pkg,msi}; do
+    for f in "$d"/*.{deb,rpm,pkg,msi,tar,gz,AppImage,flatpak,snap}; do
       [ -f "$f" ] && ARTIFACTS+=("$f")
     done
+  done
+  for f in "${SCRIPT_DIR}/snap"/*.snap; do
+    [ -f "$f" ] && ARTIFACTS+=("$f")
   done
 }
 
@@ -214,6 +279,10 @@ else
   has_platform rpm && build_rpm
   has_platform pkg && build_pkg
   has_platform msi && build_msi
+  has_platform tarball && build_tarball
+  has_platform appimage && build_appimage
+  has_platform flatpak && build_flatpak
+  has_platform snap && build_snap
 fi
 
 if [ "${#ARTIFACTS[@]}" -eq 0 ]; then

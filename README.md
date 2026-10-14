@@ -87,6 +87,38 @@ lanlink/
 └── README.md              # this file
 ```
 
+## Quick start (install)
+
+### Linux — one command
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh
+LANLINK_PASSWORD=hunter2 sudo -E lanlinkd service up gaming-night
+lanlink-desktop
+```
+
+### Windows — one command
+
+Run in an **elevated PowerShell**:
+
+```powershell
+irm https://raw.githubusercontent.com/lanlink/lanlink/main/dist/windows/install.ps1 | iex
+lanlinkd service up --name gaming-night --password hunter2
+```
+
+Then open **LanLink** from the Start Menu.
+
+### macOS
+
+Download the latest `.pkg` from [GitHub Releases](https://github.com/lanlink/lanlink/releases)
+and run:
+
+```bash
+sudo installer -pkg lanlink-*-macos-*.pkg -target /
+```
+
+For full install options see [`docs/install.md`](./docs/install.md).
+
 ## Quick start (development)
 
 Requires **Rust 1.79+** and root privileges for TAP device management.

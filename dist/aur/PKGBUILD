@@ -1,10 +1,10 @@
 # Maintainer: LanLink Contributors <lanlink@example.com>
 # Build-time GUI selector:
+#   makepkg LL_GUI=none     # daemon, CLI, coordinator and relay only
 #   makepkg LL_GUI=tui      # terminal UI + unified launcher
 #   makepkg LL_GUI=web      # browser WebUI + unified launcher
 #   makepkg LL_GUI=desktop  # native desktop UI + unified launcher
-#   makepkg LL_GUI=all      # all GUI frontends + unified launcher
-#   makepkg                 # daemon, CLI, coordinator and relay only
+#   makepkg LL_GUI=all      # all GUI frontends + unified launcher (default)
 pkgname=lanlink-git
 pkgver=0.1.0
 pkgrel=1
@@ -35,10 +35,12 @@ build() {
     cd "$srcdir/lanlink"
     export CARGO_TARGET_DIR=target
 
-    # Resolve GUI selector: tui, web, desktop, all, or empty.
-    _gui="${LL_GUI:-}"
+    # Resolve GUI selector: none, tui, web, desktop, all, or empty.
+    _gui="${LL_GUI:-all}"
     _gui_bins=()
     case "$_gui" in
+        none|NONE)
+            ;;
         all|ALL)
             _gui_bins=(lanlink-tui lanlink-web lanlink-desktop lanlink-gui)
             ;;
@@ -66,11 +68,12 @@ build() {
 
 check() {
     cd "$srcdir/lanlink"
-    # Only test the packages we actually build; the desktop frontend requires
-    # webkit2gtk and is not built unless explicitly requested.
-    _gui="${LL_GUI:-}"
+    # Only test the packages we actually build.
+    _gui="${LL_GUI:-all}"
     _gui_bins=()
     case "$_gui" in
+        none|NONE)
+            ;;
         all|ALL)
             _gui_bins=(lanlink-tui lanlink-web lanlink-desktop lanlink-gui)
             ;;
@@ -104,9 +107,11 @@ package() {
     done
 
     # Install selected GUI binaries if they were built.
-    _gui="${LL_GUI:-}"
+    _gui="${LL_GUI:-all}"
     _gui_bins=()
     case "$_gui" in
+        none|NONE)
+            ;;
         all|ALL)
             _gui_bins=(lanlink-tui lanlink-web lanlink-desktop lanlink-gui)
             ;;

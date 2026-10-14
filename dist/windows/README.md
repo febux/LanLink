@@ -2,38 +2,55 @@
 
 LanLink on Windows consists of three parts:
 
-1. **`lanlinkd.exe`** — the daemon (this build). It talks to the
+1. **`lanlinkd.exe`** — the daemon. It talks to the
    [Wintun](https://www.wintun.net/) driver for the virtual Ethernet adapter.
-   The Wintun backend is still a stub; until it lands, the daemon runs but
-   cannot create the NIC.
 2. **The Wintun driver** — `wintun.dll` (bundled with WireGuard, MIT
-   licensed). Ship `wintun.dll` next to `lanlinkd.exe` or install it to
-   `C:\Windows\System32\`.
-3. **A Windows service** — `lanlinkd service install` registers the service
-   with the SCM (automatic start). It runs:
+   licensed). The MSI installs it next to `lanlinkd.exe`.
+3. **A Windows service** — `LanLinkDaemon` runs automatically and reads
+   `C:\ProgramData\LanLink\lanlinkd.toml`.
+4. **GUI front-ends** — the MSI can include the native desktop UI
+   (`lanlink-desktop.exe`), the browser WebUI (`lanlink-web.exe`), the terminal
+   UI (`lanlink-tui.exe`), and the unified launcher (`lanlink-gui.exe`).
 
-   ```
-   lanlinkd.exe service run --config C:\ProgramData\LanLink\lanlinkd.toml
-   ```
+## One-line install
+
+Run in an **elevated PowerShell**:
+
+```powershell
+irm https://raw.githubusercontent.com/lanlink/lanlink/main/dist/windows/install.ps1 | iex
+```
+
+Then create or join a network:
+
+```powershell
+lanlinkd service up --name gaming-night --password "s3cret"
+```
+
+Or open **LanLink** from the Start Menu.
 
 ## Build (from any OS with cross toolchain, or on Windows)
 
 ```
-cargo build --release -p lanlinkd -p lanlinkctl
+cargo build --release -p lanlinkd -p lanlinkctl -p lanlink-desktop -p lanlink-web -p lanlink-tui -p lanlink-gui -p lanlink-relay -p coordinator
+```
+
+To build the MSI:
+
+```
+make build-msi                # builds with all GUI front-ends (default)
+make build-msi LL_GUI=desktop # desktop GUI only
+make build-msi LL_GUI=web     # web UI only
 ```
 
 ## Service management (run as Administrator)
 
-```
+```powershell
 > lanlinkd service install       # register service (auto-start)
-> lanlinkd service start ""      # start
+> lanlinkd service up --name gaming-night --password "s3cret"  # create/join + start
 > lanlinkd service status
-> lanlinkd service stop ""
+> lanlinkd service stop
 > lanlinkd service uninstall
 ```
-
-The empty string argument is the per-network instance name used on Linux
-(`lanlinkd@<name>`); Windows runs a single instance and ignores it.
 
 Config lives at `C:\ProgramData\LanLink\lanlinkd.toml` (same format as
 `dist/lanlinkd.example.toml`).
@@ -42,12 +59,14 @@ Config lives at `C:\ProgramData\LanLink\lanlinkd.toml` (same format as
 
 The MSI (`dist/windows/lanlink.wxs` + `build-msi.sh`, WiX v4+) installs:
 
-- `C:\Program Files\LanLink\` — `lanlinkd.exe`, `lanlinkctl.exe`, `wintun.dll`,
-  README (and adds the dir to the system `PATH`)
+- `C:\Program Files\LanLink\` — all binaries (`lanlinkd.exe`, `lanlinkctl.exe`,
+  optional GUI binaries, `wintun.dll`) and adds the dir to the system `PATH`
 - `C:\ProgramData\LanLink\lanlinkd.example.toml` — never overwrites an
   operator-edited `lanlinkd.toml`
 - the `LanLinkDaemon` Windows service (auto-start, LocalSystem), started on
   install and fully removed on uninstall
+- a Start Menu shortcut for `lanlink-desktop.exe` when the desktop GUI is
+  included
 
 Build from the repo root (on Windows, or on Linux/macOS with `cargo-xwin`):
 
@@ -60,20 +79,17 @@ The script stages the binaries, bundles `wintun.dll` (downloaded from
 release CI), and runs `wix build`. Requirements: the `wix` CLI
 (`dotnet tool install --global wix`), `curl`, `unzip`, and an MSVC target
 toolchain when cross-building. See the script header for all knobs
-(`VERSION`, `BIN_DIR`, `WINTUN_DLL`, `SKIP_BUILD`).
+(`VERSION`, `BIN_DIR`, `WINTUN_DLL`, `SKIP_BUILD`, `LL_GUI`).
 
-After installing, copy the example config to `lanlinkd.toml`, fill in your
-network, and start the service:
+After installing, the recommended first step is the one-line network setup:
 
-```
-> copy "C:\ProgramData\LanLink\lanlinkd.example.toml" "C:\ProgramData\LanLink\lanlinkd.toml"
-> notepad "C:\ProgramData\LanLink\lanlinkd.toml"
-> sc start LanLinkDaemon
+```powershell
+> lanlinkd service up --name gaming-night --password "s3cret"
 ```
 
 Manual service installation (no MSI) remains supported:
 
-```
+```powershell
 > lanlinkd service install
 > lanlinkd service start ""
 ```

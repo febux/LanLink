@@ -7,10 +7,11 @@ Summary:        Cross-platform Radmin-VPN-style virtual LAN (daemon + tools)
 License:        Apache-2.0
 URL:            https://github.com/lanlink/lanlink
 Source0:        %{url}/archive/v%{version}/%{name}-%{version}.tar.gz
-Requires:       nftables iproute2
+Requires:       nftables iproute2 webkit2gtk4.1
 Recommends:     coturn
 BuildRequires:  cargo
 BuildRequires:  systemd-rpm-macros
+BuildRequires:  webkit2gtk4.1-devel
 
 ExclusiveArch:  %{rust_arches}
 
@@ -21,22 +22,26 @@ broadcast, multicast) over encrypted peer-to-peer UDP with NAT traversal and
 a content-blind relay fallback.
 
 This package contains the lanlinkd daemon, lanlinkctl CLI, the
-lanlink-relayd relay server and the lanlink-coordinator membership server.
+lanlink-relayd relay server, the lanlink-coordinator membership server and the
+lanlink-desktop / lanlink-web / lanlink-tui / lanlink-gui front-ends.
 
 %prep
 %autosetup -n lanlink
 
 %build
-# Build only the daemon/core binaries. The GUI front-ends (Tauri/Web/TUI)
-# are packaged separately via dist/deb/build-deb.sh and dist/aur/PKGBUILD.
+# Build the daemon/core binaries plus the GUI front-ends by default.
 cargo fetch --locked --target %{_arch}-unknown-linux-gnu
-cargo build --release --frozen -p lanlinkd -p lanlinkctl -p lanlink-relay -p coordinator
+cargo build --release --frozen -p lanlinkd -p lanlinkctl -p lanlink-relay -p coordinator -p lanlink-desktop -p lanlink-web -p lanlink-tui -p lanlink-gui
 
 %install
 install -D -m 0755 target/release/lanlinkd %{buildroot}%{_bindir}/lanlinkd
 install -D -m 0755 target/release/lanlinkctl %{buildroot}%{_bindir}/lanlinkctl
 install -D -m 0755 target/release/lanlink-relayd %{buildroot}%{_bindir}/lanlink-relayd
 install -D -m 0755 target/release/lanlink-coordinator %{buildroot}%{_bindir}/lanlink-coordinator
+install -D -m 0755 target/release/lanlink-desktop %{buildroot}%{_bindir}/lanlink-desktop
+install -D -m 0755 target/release/lanlink-web %{buildroot}%{_bindir}/lanlink-web
+install -D -m 0755 target/release/lanlink-tui %{buildroot}%{_bindir}/lanlink-tui
+install -D -m 0755 target/release/lanlink-gui %{buildroot}%{_bindir}/lanlink-gui
 install -D -m 0644 dist/systemd/lanlinkd@.service %{buildroot}%{_unitdir}/lanlinkd@.service
 install -D -m 0644 dist/systemd/lanlink-coordinator.service %{buildroot}%{_unitdir}/lanlink-coordinator.service
 install -D -m 0644 dist/systemd/lanlink-relayd.service %{buildroot}%{_unitdir}/lanlink-relayd.service
@@ -65,6 +70,10 @@ systemctl stop 'lanlinkd@*' >/dev/null 2>&1 || :
 %{_bindir}/lanlinkctl
 %{_bindir}/lanlink-relayd
 %{_bindir}/lanlink-coordinator
+%{_bindir}/lanlink-desktop
+%{_bindir}/lanlink-web
+%{_bindir}/lanlink-tui
+%{_bindir}/lanlink-gui
 %{_unitdir}/lanlinkd@.service
 %{_unitdir}/lanlink-coordinator.service
 %{_unitdir}/lanlink-relayd.service

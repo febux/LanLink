@@ -14,6 +14,10 @@
 #   make run-daemon / run-coordinator      Run binaries in help mode
 #   make gui MODE=web                      Start GUI launcher
 #   make build-deb / build-rpm / ...       Build platform packages
+#   make build-tarball                     Build portable Linux tarball
+#   make build-appimage                    Build Tauri AppImage
+#   make build-flatpak                     Build Flatpak bundle
+#   make build-snap                        Build Snap package
 #   make dist                              Build all packages for host
 #   make dist-publish-ci                   Push a release tag (CI will publish)
 #   make bump-version VERSION=0.3.0        Bump workspace version
@@ -34,12 +38,16 @@ MODE ?= tui
 VERSION ?= $(shell awk -F'"' '/^version =/{print $$2; exit}' Cargo.toml)
 
 # Paths to builder scripts.
-BUILD_DEB  := dist/deb/build-deb.sh
-BUILD_RPM  := dist/rpm/build-rpm.sh
-BUILD_MSI  := dist/windows/build-msi.sh
-BUILD_PKG  := dist/macos/build-pkg.sh
-PUBLISH    := dist/publish-release.sh
-GUI_LAUNCH := scripts/gui-start.sh
+BUILD_DEB      := dist/deb/build-deb.sh
+BUILD_RPM      := dist/rpm/build-rpm.sh
+BUILD_MSI      := dist/windows/build-msi.sh
+BUILD_PKG      := dist/macos/build-pkg.sh
+BUILD_TARBALL  := dist/tarball/build-tarball.sh
+BUILD_APPIMAGE := dist/appimage/build-appimage.sh
+BUILD_FLATPAK  := dist/flatpak/build-flatpak.sh
+BUILD_SNAP     := dist/snap/snapcraft.yaml
+PUBLISH        := dist/publish-release.sh
+GUI_LAUNCH     := scripts/gui-start.sh
 
 # ---------------------------------------------------------------------------
 # Group: Development / quality
@@ -96,7 +104,7 @@ web: run-web ## Legacy alias for web launcher
 # Group: Builders
 # ---------------------------------------------------------------------------
 
-.PHONY: build build-deb build-rpm build-msi build-pkg dist
+.PHONY: build build-deb build-rpm build-msi build-pkg build-tarball build-appimage build-flatpak build-snap dist
 
 build: check ## Run buildable checks (alias for cargo check)
 
@@ -112,11 +120,27 @@ build-msi: ## Build Windows MSI package
 build-pkg: ## Build macOS pkg installer
 	bash $(BUILD_PKG)
 
+build-tarball: ## Build portable Linux tarball
+	bash $(BUILD_TARBALL)
+
+build-appimage: ## Build Tauri AppImage
+	bash $(BUILD_APPIMAGE)
+
+build-flatpak: ## Build Flatpak bundle
+	bash $(BUILD_FLATPAK)
+
+build-snap: ## Build Snap package
+	snapcraft --use-lxd --project-dir dist/snap
+
 dist: ## Build all distribution packages available on this host
 	$(MAKE) build-deb || true
 	$(MAKE) build-rpm || true
 	$(MAKE) build-msi || true
 	$(MAKE) build-pkg || true
+	$(MAKE) build-tarball || true
+	$(MAKE) build-appimage || true
+	$(MAKE) build-flatpak || true
+	$(MAKE) build-snap || true
 
 # ---------------------------------------------------------------------------
 # Group: Publishers

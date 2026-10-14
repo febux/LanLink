@@ -19,23 +19,26 @@
 #
 # Environment variables:
 #   VERSION      package version (default: workspace version from Cargo.toml)
-#   BIN_DIR      directory with lanlinkd.exe / lanlinkctl.exe (default staged here)
+#   BIN_DIR      directory with staged binaries (default: stage/ under this dir)
 #   WINTUN_DLL   path to a wintun.dll to bundle
 #   WINTUN_URL   zip download URL (default wintun 0.14.1)
 #   WINTUN_SHA256  optional pinned sha256 of the zip
 #   SKIP_BUILD=1 skip stage 1 (useful when binaries are already staged)
+#   LL_GUI       Comma-separated: tui, web, desktop, all (default: all)
+#   TARGET       Rust target triple (default: x86_64-pc-windows-msvc)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 OUT_DIR="${SCRIPT_DIR}/out"
 STAGE_DIR="${SCRIPT_DIR}/stage"
-TARGET_TRIPLE="x86_64-pc-windows-msvc"
+TARGET_TRIPLE="${TARGET:-x86_64-pc-windows-msvc}"
 WINTUN_URL_DEFAULT="https://www.wintun.net/builds/wintun-0.14.1.zip"
 
 VERSION="${VERSION:-$(awk -F'"' '/^version =/{print $2; exit}' "${REPO_DIR}/Cargo.toml")}"
 BIN_DIR="${BIN_DIR:-${STAGE_DIR}}"
 WINTUN_URL="${WINTUN_URL:-${WINTUN_URL_DEFAULT}}"
+LL_GUI="${LL_GUI:-all}"
 
 log() { printf '[build-msi] %s\n' "$*"; }
 die() { printf '[build-msi] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -45,25 +48,49 @@ command -v wix >/dev/null 2>&1 \
 
 mkdir -p "${OUT_DIR}" "${STAGE_DIR}"
 
+# ---- Resolve GUI selector -------------------------------------------------
+WITH_TUI=0
+WITH_WEB=0
+WITH_DESKTOP=0
+case ",${LL_GUI}," in
+  *,all,*) WITH_TUI=1; WITH_WEB=1; WITH_DESKTOP=1 ;;
+esac
+case ",${LL_GUI}," in
+  *,tui,*) WITH_TUI=1 ;;
+esac
+case ",${LL_GUI}," in
+  *,web,*) WITH_WEB=1 ;;
+esac
+case ",${LL_GUI}," in
+  *,desktop,*) WITH_DESKTOP=1 ;;
+esac
+
+GUI_BINS=()
+[ "${WITH_TUI}" = 1 ] && GUI_BINS+=(lanlink-tui)
+[ "${WITH_WEB}" = 1 ] && GUI_BINS+=(lanlink-web)
+[ "${WITH_DESKTOP}" = 1 ] && GUI_BINS+=(lanlink-desktop)
+[ "${#GUI_BINS[@]}" -gt 0 ] && GUI_BINS+=(lanlink-gui)
+
+CARGO_PACKAGES=(-p lanlinkd -p lanlinkctl -p lanlink-relay -p coordinator)
+for bin in "${GUI_BINS[@]}"; do
+  CARGO_PACKAGES+=(-p "${bin}")
+done
+
 # ---- Stage 1: Windows binaries -------------------------------------------
 if [ "${SKIP_BUILD:-0}" != "1" ]; then
+    rm -f "${STAGE_DIR}"/*.exe
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
             log "building natively on Windows (release)..."
-            cargo build --release -p lanlinkd -p lanlinkctl
-            cp "target/release/lanlinkd.exe" "target/release/lanlinkctl.exe" "${STAGE_DIR}/"
+            cargo build --release --target "${TARGET_TRIPLE}" "${CARGO_PACKAGES[@]}"
             ;;
         *)
             if command -v cargo-xwin >/dev/null 2>&1; then
                 log "cross-building via cargo-xwin..."
-                cargo xwin build --release --target "${TARGET_TRIPLE}" -p lanlinkd -p lanlinkctl
-                cp "target/${TARGET_TRIPLE}/release/lanlinkd.exe" \
-                   "target/${TARGET_TRIPLE}/release/lanlinkctl.exe" "${STAGE_DIR}/"
+                cargo xwin build --release --target "${TARGET_TRIPLE}" "${CARGO_PACKAGES[@]}"
             elif rustup target list --installed 2>/dev/null | grep -q "${TARGET_TRIPLE}"; then
                 log "cross-building with target ${TARGET_TRIPLE} (requires MSVC libs; consider cargo-xwin)..."
-                cargo build --release --target "${TARGET_TRIPLE}" -p lanlinkd -p lanlinkctl
-                cp "target/${TARGET_TRIPLE}/release/lanlinkd.exe" \
-                   "target/${TARGET_TRIPLE}/release/lanlinkctl.exe" "${STAGE_DIR}/"
+                cargo build --release --target "${TARGET_TRIPLE}" "${CARGO_PACKAGES[@]}"
             else
                 die "no Windows toolchain found on $(uname -s).
   Options:
@@ -73,10 +100,18 @@ if [ "${SKIP_BUILD:-0}" != "1" ]; then
             fi
             ;;
     esac
+    # Copy all built binaries into the stage dir.
+    for bin in lanlinkd lanlinkctl lanlink-relayd lanlink-coordinator; do
+        cp "target/${TARGET_TRIPLE}/release/${bin}.exe" "${STAGE_DIR}/" || die "missing ${bin}.exe"
+    done
+    for bin in "${GUI_BINS[@]}"; do
+        cp "target/${TARGET_TRIPLE}/release/${bin}.exe" "${STAGE_DIR}/" || die "missing ${bin}.exe"
+    done
 fi
 
-[ -f "${BIN_DIR}/lanlinkd.exe" ]  || die "${BIN_DIR}/lanlinkd.exe missing (stage binaries or set SKIP_BUILD=0)"
-[ -f "${BIN_DIR}/lanlinkctl.exe" ] || die "${BIN_DIR}/lanlinkctl.exe missing"
+for bin in lanlinkd lanlinkctl; do
+    [ -f "${BIN_DIR}/${bin}.exe" ] || die "${BIN_DIR}/${bin}.exe missing (stage binaries or set SKIP_BUILD=0)"
+done
 
 # ---- Stage 2: wintun.dll ---------------------------------------------------
 if [ -n "${WINTUN_DLL:-}" ]; then
@@ -101,9 +136,18 @@ fi
 MSI="${OUT_DIR}/lanlink-${VERSION}-x64.msi"
 log "building ${MSI} (version ${VERSION})..."
 WIX_EULA_ID="${WIX_EULA_ID:-wix7}"
+
+# Pass WiX variables for optional GUI components.
+WIX_GUI_DEFS=()
+[ "${WITH_TUI}" = 1 ] && WIX_GUI_DEFS+=(-d "IncludeTui=1")
+[ "${WITH_WEB}" = 1 ] && WIX_GUI_DEFS+=(-d "IncludeWeb=1")
+[ "${WITH_DESKTOP}" = 1 ] && WIX_GUI_DEFS+=(-d "IncludeDesktop=1")
+
 wix build -arch x64 -acceptEula "${WIX_EULA_ID}" "${SCRIPT_DIR}/lanlink.wxs" \
     -d "Version=${VERSION}" \
-    -d "BinDir=${STAGE_DIR}" \
+    -d "BinDir=${BIN_DIR}" \
+    -d "StageDir=${STAGE_DIR}" \
+    "${WIX_GUI_DEFS[@]}" \
     -o "${MSI}"
 
 log "done: ${MSI}"

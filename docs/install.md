@@ -1,7 +1,7 @@
 # Installation Guide
 
-This guide shows how to install LanLink on Linux with **one command**, picking the
-front-end you want: terminal UI (TUI), browser WebUI, or native desktop app.
+This guide shows how to install LanLink on Linux and Windows with **one command**,
+picking the front-end you want: native desktop app, browser WebUI, or terminal UI.
 
 For maintainers, see [`dist/publish-release.sh`](../dist/publish-release.sh) or
 `make dist-publish` to build and publish all distribution packages to GitHub
@@ -22,74 +22,137 @@ You can optionally include one or more GUI front-ends:
 
 | Front-end | Binary | Description |
 |---|---|---|
-| Terminal UI | `lanlink-tui` | Runs in any terminal |
-| Browser WebUI | `lanlink-web` | Serves the UI on `http://127.0.0.1:8686` |
 | Native desktop | `lanlink-desktop` | Tauri-based window with system tray |
+| Browser WebUI | `lanlink-web` | Serves the UI on `http://127.0.0.1:8686` |
+| Terminal UI | `lanlink-tui` | Runs in any terminal |
 | Unified launcher | `lanlink-gui` | One binary that can start TUI/Web/Desktop |
 
-## One-command summary
+## One-command install
+
+### Linux
 
 ```bash
-# Debian / Ubuntu — build a .deb with the front-end you want, then install it
-make build-deb LL_GUI=tui   && sudo dpkg -i dist/deb/out/lanlink_*_amd64.deb
-make build-deb LL_GUI=web   && sudo dpkg -i dist/deb/out/lanlink_*_amd64.deb
-make build-deb LL_GUI=all   && sudo dpkg -i dist/deb/out/lanlink_*_amd64.deb
+# Native desktop app (default)
+curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh
 
-# Arch Linux — build and install from the AUR with the front-end you want
-cd dist/aur && LL_GUI=tui   makepkg -si
-cd dist/aur && LL_GUI=web   makepkg -si
-cd dist/aur && LL_GUI=all   makepkg -si
+# Terminal UI
+curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh -s -- --gui tui
 
-# Or use systemd units only (no package manager)
-sudo cp dist/systemd/*.service /etc/systemd/system/
-sudo systemctl daemon-reload
+# Browser WebUI
+curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh -s -- --gui web
+
+# Pick a different package format
+curl -fsSL ... | sh -s -- --pkg deb       # Debian/Ubuntu (default on apt systems)
+curl -fsSL ... | sh -s -- --pkg rpm       # Fedora/RHEL
+curl -fsSL ... | sh -s -- --pkg tarball  # Any distro, no package manager
+curl -fsSL ... | sh -s -- --pkg appimage  # Single-file desktop app
+curl -fsSL ... | sh -s -- --pkg flatpak   # Flatpak bundle
+curl -fsSL ... | sh -s -- --pkg snap      # Snap package
 ```
 
-## Debian / Ubuntu (.deb)
+### Windows
 
-### 1. Build the package
+Run in an **elevated PowerShell**:
 
-Run this from the repository root:
-
-```bash
-# Default package: daemon + CLI + coordinator + relay
-make build-deb
-
-# Add the terminal UI
-make build-deb LL_GUI=tui
-
-# Add the browser WebUI
-make build-deb LL_GUI=web
-
-# Add the native desktop UI
-make build-deb LL_GUI=desktop
-
-# Install all front-ends at once
-make build-deb LL_GUI=all
-
-# Build every package the host can produce (deb, rpm, msi, pkg)
-make dist
+```powershell
+irm https://raw.githubusercontent.com/lanlink/lanlink/main/dist/windows/install.ps1 | iex
 ```
 
-You can also pass flags directly to the build script instead of using `make`:
+Then create or join a network:
 
-```bash
-bash dist/deb/build-deb.sh --with-tui
-bash dist/deb/build-deb.sh --with-web
-bash dist/deb/build-deb.sh --with-desktop
-bash dist/deb/build-deb.sh --with-gui
+```powershell
+lanlinkd service up --name gaming-night --password "s3cret"
+# or open LanLink from the Start Menu
 ```
 
-The package is written to `dist/deb/out/lanlink_<version>-1_<arch>.deb`.
+### macOS
 
-### 2. Install it
+Download the latest `.pkg` from [GitHub Releases](https://github.com/lanlink/lanlink/releases)
+and double-click it, or run:
 
 ```bash
-sudo dpkg -i dist/deb/out/lanlink_*_amd64.deb
+sudo installer -pkg lanlink-*-macos-*.pkg -target /
+```
+
+## Manual package downloads
+
+All release artifacts are published to [GitHub Releases](https://github.com/lanlink/lanlink/releases):
+
+| Format | File | Best for |
+|---|---|---|
+| Debian/Ubuntu | `lanlink_*_amd64.deb` | apt/dpkg users |
+| Fedora/RHEL | `lanlink-*-1.*.rpm` | dnf/yum users |
+| Windows | `lanlink-*-x64.msi` | One-click MSI install |
+| macOS | `lanlink-*-macos-*.pkg` | Native installer |
+| Portable tarball | `lanlink-*-linux-*.tar.gz` | Any Linux distro, manual install |
+| AppImage | `lanlink-*-linux-x86_64.AppImage` | Run without installing |
+| Flatpak | `lanlink-*-linux-x86_64.flatpak` | Flatpak users |
+| Snap | `lanlink_*_amd64.snap` | snap users |
+
+## Package-specific instructions
+
+### Debian / Ubuntu (.deb)
+
+Released `.deb` packages include the native desktop GUI by default.
+
+```bash
+# Download from GitHub Releases, then:
+sudo dpkg -i lanlink_*_amd64.deb
 sudo apt-get install -f   # install any missing dependencies
 ```
 
-### 3. Start the service
+Or build from source:
+
+```bash
+make build-deb LL_GUI=all   # include all front-ends
+```
+
+### Fedora / RHEL (.rpm)
+
+```bash
+sudo dnf install ./lanlink-*-1.x86_64.rpm
+```
+
+### Arch Linux (AUR)
+
+```bash
+cd dist/aur
+makepkg -si
+```
+
+### Portable Linux tarball
+
+```bash
+tar -xzf lanlink-*-linux-x86_64.tar.gz
+sudo ./lanlink-*/install-local.sh
+```
+
+This installs to `/usr/local` and registers systemd units.
+
+### AppImage
+
+```bash
+chmod +x lanlink-*-linux-x86_64.AppImage
+./lanlink-*-linux-x86_64.AppImage
+```
+
+### Flatpak
+
+```bash
+flatpak install ./lanlink-*-linux-x86_64.flatpak
+flatpak run com.lanlink.LanLink
+```
+
+### Snap
+
+```bash
+sudo snap install --dangerous --devmode ./lanlink_*_amd64.snap
+lanlink
+```
+
+## Start the service after install
+
+### Linux
 
 ```bash
 # One-command ad-hoc network (creates config + secret + systemd unit)
@@ -103,90 +166,43 @@ sudo lanlinkd service start gaming-night
 sudo lanlinkd service enable gaming-night
 ```
 
-## Arch Linux (AUR)
+### Windows
 
-The repository ships a `PKGBUILD` in `dist/aur/` that can be used directly with
-`makepkg` or submitted to the AUR.
+```powershell
+# One command: resolve/create the network, write config, start the service
+lanlinkd service up --name gaming-night --password "s3cret"
 
-### 1. Build and install
-
-```bash
-cd dist/aur
-
-# Daemon + CLI + coordinator + relay only
-makepkg -si
-
-# With a specific front-end (export the selector first)
-LL_GUI=tui   makepkg -si
-LL_GUI=web   makepkg -si
-LL_GUI=desktop makepkg -si
-LL_GUI=all   makepkg -si
+# Or manage the config manually
+copy "C:\ProgramData\LanLink\lanlinkd.example.toml" "C:\ProgramData\LanLink\lanlinkd.toml"
+notepad "C:\ProgramData\LanLink\lanlinkd.toml"
+sc start LanLinkDaemon
 ```
 
-> **Desktop build note:** `LL_GUI=desktop` requires `webkit2gtk-4.1`
-> development headers. Install it first with `sudo pacman -S webkit2gtk-4.1`.
-
-### 2. Start the service
-
-Same commands as Debian:
+### macOS
 
 ```bash
-LANLINK_PASSWORD='s3cret' sudo -E lanlinkd service up gaming-night
-
-# Or use the systemd template directly
-sudo systemctl enable --now lanlinkd@gaming-night
-```
-
-## systemd only (no package manager)
-
-If you already built the binaries or downloaded a release archive, you can
-install just the systemd units:
-
-```bash
-sudo cp dist/systemd/lanlinkd@.service /etc/systemd/system/
-sudo cp dist/systemd/lanlink-coordinator.service /etc/systemd/system/
-sudo cp dist/systemd/lanlink-relayd.service /etc/systemd/system/
-sudo systemctl daemon-reload
-
-# Create the unprivileged runtime user the unit expects
-sudo useradd -r -s /usr/sbin/nologin -M lanlink || true
-
-# Start an instance
-sudo install -d -m 0750 /etc/lanlink
-sudo cp dist/lanlinkd.example.toml /etc/lanlink/gaming-night.toml
-sudoedit /etc/lanlink/gaming-night.toml
-sudo systemctl enable --now lanlinkd@gaming-night
+sudo launchctl load /Library/LaunchDaemons/com.lanlink.lanlinkd.plist
 ```
 
 ## Running the GUI after install
 
-After installation, start the front-end you built with a single command.
-`lanlink-gui` is the unified launcher and is included automatically whenever
-you build any front-end.
-
 ```bash
-# Terminal UI
-lanlink-gui --mode tui
+# Native desktop app
+lanlink-desktop
 
 # Browser WebUI (auto-opens browser by default)
-lanlink-gui --mode web
-lanlink-gui --mode web --bind 0.0.0.0:8686
+lanlink-web
 
-# Native desktop app
+# Terminal UI
+lanlink-tui
+
+# Unified launcher
 lanlink-gui --mode desktop
+lanlink-gui --mode web
+lanlink-gui --mode tui
 
 # Full dev stack: coordinator + daemon + front-end, no manual service setup
-lanlink-gui --dev --mode web
-lanlink-gui --dev --mode tui
 lanlink-gui --dev --mode desktop
-```
-
-Or use the Makefile from the source tree:
-
-```bash
-make gui
-make gui MODE=web
-make gui MODE=desktop
 ```
 
 ## Build selector reference
@@ -199,23 +215,15 @@ make gui MODE=desktop
 | Desktop | `make build-deb LL_GUI=desktop` | `LL_GUI=desktop makepkg -si` | `lanlink-desktop` + `lanlink-gui` |
 | All | `make build-deb LL_GUI=all` | `LL_GUI=all makepkg -si` | All front-ends + `lanlink-gui` |
 
-### Debian-only script flags
-
-```bash
-bash dist/deb/build-deb.sh --with-tui
-bash dist/deb/build-deb.sh --with-web
-bash dist/deb/build-deb.sh --with-desktop
-bash dist/deb/build-deb.sh --with-gui
-```
-
-The `LL_GUI` environment variable and the `--with-*` flags produce the same
-result for the Debian build.
-
 ## Troubleshooting
 
 - `dpkg: dependency problems` → run `sudo apt-get install -f` after `dpkg -i`.
 - Desktop build fails on Linux → install `webkit2gtk-4.1` headers
   (`libwebkit2gtk-4.1-dev` on Debian/Ubuntu, `webkit2gtk-4.1` on Arch).
-- Service fails to start → check `journalctl -u lanlinkd@gaming-night -e`.
+- Service fails to start → check `journalctl -u lanlinkd@gaming-night -e` on Linux
+  or `sc query LanLinkDaemon` on Windows.
 - Permission denied on TAP device → the unit needs `CAP_NET_ADMIN` and
   `CAP_NET_RAW`; the packaged `lanlinkd@.service` already sets these.
+- Windows: the Wintun driver is bundled as `wintun.dll`; the virtual adapter
+  appears the first time the daemon creates it after the Wintun backend is
+  wired up.

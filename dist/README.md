@@ -8,6 +8,10 @@ from the workspace root with `make` or the per-platform scripts.
 | Linux (Debian/Ubuntu) | `.deb` + systemd | `dist/deb/build-deb.sh` or `make build-deb` |
 | Linux (Fedora/RHEL) | `.rpm` + systemd | `dist/rpm/build-rpm.sh` or `make build-rpm` |
 | Linux (Arch) | AUR | `dist/aur/PKGBUILD` |
+| Linux (any distro) | portable tarball | `dist/tarball/build-tarball.sh` or `make build-tarball` |
+| Linux (desktop) | AppImage | `dist/appimage/build-appimage.sh` or `make build-appimage` |
+| Linux (desktop) | Flatpak | `dist/flatpak/build-flatpak.sh` or `make build-flatpak` |
+| Linux (desktop) | Snap | `dist/snap/snapcraft.yaml` or `make build-snap` |
 | macOS | `.pkg` + launchd | `dist/macos/build-pkg.sh` or `make build-pkg` |
 | Windows | MSI (WiX) + Windows service | `dist/windows/build-msi.sh` or `make build-msi` |
 | Any | systemd units only | `dist/systemd/` |
@@ -37,6 +41,10 @@ The publish script auto-detects what the current host can build:
 - Linux with `dpkg-deb` → `.deb`
 - Linux with `rpmbuild` or Docker/Podman → `.rpm`
 - Linux with `cargo-xwin` + WiX → `.msi`
+- Linux with `cargo` → portable tarball
+- Linux with Tauri CLI + appimagetool → AppImage
+- Linux with `flatpak-builder` → Flatpak bundle
+- Linux with `snapcraft` → Snap package
 - macOS with `pkgbuild` → `.pkg`
 - Windows with WiX → `.msi`
 
@@ -46,7 +54,27 @@ collect and upload every artifact under one release.
 
 For the CI-only tag push path, use `make dist-publish-ci VERSION=0.2.0`.
 
+## One-line install scripts
+
+### Linux
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh
+```
+
+Options: `--gui desktop|web|tui|all`, `--pkg deb|rpm|tarball|appimage|flatpak|snap`.
+
+### Windows
+
+Run in an elevated PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/lanlink/lanlink/main/dist/windows/install.ps1 | iex
+```
+
 ## Building the .deb with GUI front-ends
+
+Released `.deb` packages include the desktop GUI by default.
 
 ```sh
 # Terminal UI
@@ -58,7 +86,7 @@ make build-deb LL_GUI=web
 # Native desktop UI (requires webkit2gtk headers)
 make build-deb LL_GUI=desktop
 
-# All front-ends
+# All front-ends (default for release builds)
 make build-deb LL_GUI=all
 
 # Build every package the host can produce

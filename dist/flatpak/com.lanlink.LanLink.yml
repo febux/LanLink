@@ -1,0 +1,28 @@
+app-id: com.lanlink.LanLink
+runtime: org.gnome.Platform
+runtime-version: "46"
+sdk: org.gnome.Sdk
+command: lanlink-desktop
+finish-args:
+  - --share=network
+  - --device=all
+  - --talk-name=org.freedesktop.Notifications
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+modules:
+  - name: lanlink
+    buildsystem: simple
+    build-commands:
+      - cargo build --release -p lanlinkd -p lanlinkctl -p lanlink-relay -p coordinator -p lanlink-desktop -p lanlink-gui
+      - install -Dm0755 target/release/lanlinkd /app/bin/lanlinkd
+      - install -Dm0755 target/release/lanlinkctl /app/bin/lanlinkctl
+      - install -Dm0755 target/release/lanlink-relayd /app/bin/lanlink-relayd
+      - install -Dm0755 target/release/lanlink-coordinator /app/bin/lanlink-coordinator
+      - install -Dm0755 target/release/lanlink-desktop /app/bin/lanlink-desktop
+      - install -Dm0755 target/release/lanlink-gui /app/bin/lanlink-gui
+      - install -Dm0644 dist/flatpak/com.lanlink.LanLink.desktop /app/share/applications/com.lanlink.LanLink.desktop
+      - install -Dm0644 crates/lanlink-desktop/icons/icon.png /app/share/icons/hicolor/256x256/apps/com.lanlink.LanLink.png
+    sources:
+      - type: dir
+        path: ../..

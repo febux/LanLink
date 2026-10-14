@@ -10,7 +10,7 @@
 #   --with-gui      Include all GUI frontends and the unified launcher
 #
 # Environment:
-#   LL_GUI          Comma-separated list: tui, web, desktop, all (default: none)
+#   LL_GUI          Comma-separated list: tui, web, desktop, all (default: all)
 #   LANLINK_VERSION Override the package version
 #
 # Requires: cargo, dpkg-deb, strip. Run from the repository root.
@@ -30,9 +30,9 @@ VERSION="${VERSION:-0.1.0}"
 OUT="dist/deb/out"
 PKGROOT="dist/deb/root"
 
-WITH_TUI=0
-WITH_WEB=0
-WITH_DESKTOP=0
+WITH_TUI=1
+WITH_WEB=1
+WITH_DESKTOP=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -97,10 +97,14 @@ if [ "${ARCH}" = "unknown" ]; then
   exit 1
 fi
 
-# LL_GUI env variable overrides flags: tui,web,desktop,all
+# LL_GUI env variable overrides flags: tui,web,desktop,all,none
 if [ -n "${LL_GUI:-}" ]; then
+  # Reset first so explicit lists are authoritative.
+  WITH_TUI=0; WITH_WEB=0; WITH_DESKTOP=0
   case "$LL_GUI" in
-    *all*)
+    none|NONE)
+      ;;
+    all|ALL)
       WITH_TUI=1; WITH_WEB=1; WITH_DESKTOP=1 ;;
     *)
       case ",$LL_GUI," in
@@ -168,8 +172,12 @@ install -m 0755 dist/deb/postinst "${PKGROOT}/DEBIAN/postinst"
 install -m 0755 dist/deb/prerm "${PKGROOT}/DEBIAN/prerm"
 
 DESCRIPTION_EXTRA=""
+DESKTOP_DEPENDS=""
 if [ "${#GUI_BINS[@]}" -gt 0 ]; then
   DESCRIPTION_EXTRA=" This package also includes the lanlink-gui unified launcher and the selected frontends: ${GUI_BINS[*]}."
+fi
+if [ "${WITH_DESKTOP}" = 1 ]; then
+  DESKTOP_DEPENDS=", libwebkit2gtk-4.1-0"
 fi
 
 cat > "${PKGROOT}/DEBIAN/control" <<EOF
@@ -178,7 +186,7 @@ Version: ${VERSION}
 Section: net
 Priority: optional
 Architecture: ${ARCH}
-Depends: libc6, nftables, iproute2
+Depends: libc6, nftables, iproute2${DESKTOP_DEPENDS}
 Recommends: stun-server | coturn
 Maintainer: LanLink Contributors <lanlink@example.com>
 Description: Cross-platform Radmin-VPN-style virtual LAN (daemon + tools)

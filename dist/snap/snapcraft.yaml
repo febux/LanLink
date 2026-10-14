@@ -1,0 +1,66 @@
+name: lanlink
+title: LanLink
+version: git
+summary: Cross-platform Radmin-VPN-style virtual LAN
+license: Apache-2.0
+base: core24
+confinement: devmode
+grade: devel
+apps:
+  lanlink:
+    command: bin/lanlink-desktop
+    plugs:
+      - network
+      - network-bind
+      - network-control
+      - home
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
+  lanlinkd:
+    command: bin/lanlinkd
+    daemon: simple
+    plugs:
+      - network
+      - network-bind
+      - network-control
+      - firewall-control
+      - hardware-observe
+      - raw-usb
+  lanlinkctl:
+    command: bin/lanlinkctl
+    plugs:
+      - network
+      - network-bind
+      - home
+  lanlink-coordinator:
+    command: bin/lanlink-coordinator
+    plugs:
+      - network
+      - network-bind
+      - home
+  lanlink-relayd:
+    command: bin/lanlink-relayd
+    plugs:
+      - network
+      - network-bind
+parts:
+  lanlink:
+    plugin: rust
+    source: ..
+    rust-channel: stable
+    build-packages:
+      - pkg-config
+      - libssl-dev
+      - libwebkit2gtk-4.1-dev
+    stage-packages:
+      - libwebkit2gtk-4.1-0
+    override-build: |
+      cargo build --release -p lanlinkd -p lanlinkctl -p lanlink-relay -p coordinator -p lanlink-desktop -p lanlink-gui
+      install -Dm0755 target/release/lanlinkd $CRAFT_PART_INSTALL/bin/lanlinkd
+      install -Dm0755 target/release/lanlinkctl $CRAFT_PART_INSTALL/bin/lanlinkctl
+      install -Dm0755 target/release/lanlink-relayd $CRAFT_PART_INSTALL/bin/lanlink-relayd
+      install -Dm0755 target/release/lanlink-coordinator $CRAFT_PART_INSTALL/bin/lanlink-coordinator
+      install -Dm0755 target/release/lanlink-desktop $CRAFT_PART_INSTALL/bin/lanlink-desktop
+      install -Dm0755 target/release/lanlink-gui $CRAFT_PART_INSTALL/bin/lanlink-gui

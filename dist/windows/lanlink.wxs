@@ -7,19 +7,19 @@
         wix build -arch x64 dist/windows/lanlink.wxs \
           -d Version=0.1.0 \
           -d BinDir=target/x86_64-pc-windows-msvc/release \
+          -d StageDir=dist/windows/stage \
+          -d IncludeDesktop=1 \
+          -d IncludeWeb=1 \
           -o dist/windows/out/lanlink-0.1.0-x64.msi
 
       Contents:
-        - C:\Program Files\LanLink\lanlinkd.exe   (registers the LanLinkDaemon
-          Windows service, auto-start, LocalSystem)
-        - C:\Program Files\LanLink\lanlinkctl.exe
-        - C:\Program Files\LanLink\wintun.dll     (Wintun driver library, MIT,
-          https://www.wintun.net/)
-        - C:\ProgramData\LanLink\lanlinkd.example.toml (never overwrites an
-          existing lanlinkd.toml)
+        - C:\Program Files\LanLink\            binaries
+        - C:\ProgramData\LanLink\            example config
+        - LanLinkDaemon Windows service      auto-start, LocalSystem
+        - Optional Start Menu shortcut for the desktop UI
 
       The service reads its config from C:\ProgramData\LanLink\lanlinkd.toml
-      (hardcoded in crates/lanlinkd/src/service.rs; see dist/windows/README.md).
+      (hardcoded in crates/lanlinkd/src/service.rs).
     -->
     <Package
         Name="LanLink"
@@ -35,7 +35,13 @@
         <MajorUpgrade DowngradeErrorMessage="A newer version of LanLink is already installed. Uninstall it first or wait for the next release." />
         <MediaTemplate EmbedCab="yes" />
 
-        <Property Id="ARPCOMMENTS" Value="LanLink virtual LAN daemon (Radmin VPN-style mesh VPN for gaming and remote access)." />
+        <Property Id="ARPCOMMENTS" Value="LanLink virtual LAN daemon and GUI (Radmin VPN-style mesh VPN for gaming and remote access)." />
+        <Property Id="ARPURLINFOABOUT" Value="https://github.com/lanlink/lanlink" />
+
+        <!-- Feature toggles passed in via -d IncludeTui=1 etc. -->
+        <Property Id="IncludeTui" Value="0" />
+        <Property Id="IncludeWeb" Value="0" />
+        <Property Id="IncludeDesktop" Value="0" />
 
         <!-- Install directory: C:\Program Files\LanLink -->
         <StandardDirectory Id="ProgramFiles64Folder">
@@ -66,11 +72,33 @@
                     <File Id="lanlinkctl.exe" Source="$(var.BinDir)/lanlinkctl.exe" KeyPath="yes" />
                 </Component>
 
+                <!-- Self-host server binaries -->
+                <Component Id="LanlinkRelaydExe" Guid="f2e8d3c4-5b7a-4c1d-9e8f-0a1b2c3d4e5f">
+                    <File Id="lanlink_relayd.exe" Source="$(var.BinDir)/lanlink-relayd.exe" KeyPath="yes" />
+                </Component>
+                <Component Id="LanlinkCoordinatorExe" Guid="e1d7c2b3-4a69-3c0e-8d7e-9f0a1b2c3d4e">
+                    <File Id="lanlink_coordinator.exe" Source="$(var.BinDir)/lanlink-coordinator.exe" KeyPath="yes" />
+                </Component>
+
                 <!-- Wintun driver library (MIT, bundled from https://www.wintun.net/).
                      The driver itself is embedded inside the DLL and installed
                      on first adapter creation. -->
                 <Component Id="WintunDll" Guid="fce1e4bb-cf9d-430e-83ce-ec3ed08fe53f">
-                    <File Id="wintun.dll" Source="$(var.BinDir)/wintun.dll" KeyPath="yes" />
+                    <File Id="wintun.dll" Source="$(var.StageDir)/wintun.dll" KeyPath="yes" />
+                </Component>
+
+                <!-- Optional GUI front-ends -->
+                <Component Id="LanlinkTuiExe" Guid="a1b2c3d4-e5f6-7890-abcd-ef0123456789" Condition="IncludeTui = 1">
+                    <File Id="lanlink_tui.exe" Source="$(var.BinDir)/lanlink-tui.exe" KeyPath="yes" />
+                </Component>
+                <Component Id="LanlinkWebExe" Guid="b2c3d4e5-f6a7-8901-bcde-f01234567890" Condition="IncludeWeb = 1">
+                    <File Id="lanlink_web.exe" Source="$(var.BinDir)/lanlink-web.exe" KeyPath="yes" />
+                </Component>
+                <Component Id="LanlinkDesktopExe" Guid="c3d4e5f6-a7b8-9012-cdef-012345678901" Condition="IncludeDesktop = 1">
+                    <File Id="lanlink_desktop.exe" Source="$(var.BinDir)/lanlink-desktop.exe" KeyPath="yes" />
+                </Component>
+                <Component Id="LanlinkGuiExe" Guid="d4e5f6a7-b8c9-0123-defa-123456789012" Condition="IncludeTui = 1 OR IncludeWeb = 1 OR IncludeDesktop = 1">
+                    <File Id="lanlink_gui.exe" Source="$(var.BinDir)/lanlink-gui.exe" KeyPath="yes" />
                 </Component>
 
                 <!-- Add the install dir to the system PATH (last, non-permanent). -->
@@ -104,6 +132,50 @@
                 </Component>
             </Directory>
         </StandardDirectory>
+
+        <!-- Start Menu shortcut for the desktop UI -->
+        <StandardDirectory Id="ProgramMenuFolder">
+            <Directory Name="LanLink">
+                <Component Id="DesktopShortcut" Guid="e5f6a7b8-c9d0-1234-efab-234567890123" Condition="IncludeDesktop = 1">
+                    <Shortcut Id="LanLinkDesktopShortcut"
+                              Name="LanLink"
+                              Target="[INSTALLDIR]lanlink-desktop.exe"
+                              WorkingDirectory="INSTALLDIR"
+                              Description="LanLink virtual LAN desktop UI" />
+                    <RegistryValue Root="HKLM"
+                                   Key="Software\LanLink"
+                                   Name="installed"
+                                   Type="integer"
+                                   Value="1"
+                                   KeyPath="yes" />
+                </Component>
+            </Directory>
+        </StandardDirectory>
+
+        <Feature Id="Core" Title="LanLink Core" Level="1" AllowAdvertise="no" Display="expand">
+            <ComponentRef Id="LanlinkdExe" />
+            <ComponentRef Id="LanlinkctlExe" />
+            <ComponentRef Id="LanlinkRelaydExe" />
+            <ComponentRef Id="LanlinkCoordinatorExe" />
+            <ComponentRef Id="WintunDll" />
+            <ComponentRef Id="PathEnv" />
+            <ComponentRef Id="Docs" />
+            <ComponentRef Id="ExampleConfig" />
+
+            <Feature Id="TuiFeature" Title="Terminal UI" Level="1" AllowAdvertise="no" Condition="IncludeTui = 1">
+                <ComponentRef Id="LanlinkTuiExe" />
+            </Feature>
+            <Feature Id="WebFeature" Title="Browser WebUI" Level="1" AllowAdvertise="no" Condition="IncludeWeb = 1">
+                <ComponentRef Id="LanlinkWebExe" />
+            </Feature>
+            <Feature Id="DesktopFeature" Title="Desktop UI" Level="1" AllowAdvertise="no" Condition="IncludeDesktop = 1">
+                <ComponentRef Id="LanlinkDesktopExe" />
+                <ComponentRef Id="DesktopShortcut" />
+            </Feature>
+            <Feature Id="GuiLauncherFeature" Title="Unified GUI Launcher" Level="1" AllowAdvertise="no" Condition="IncludeTui = 1 OR IncludeWeb = 1 OR IncludeDesktop = 1">
+                <ComponentRef Id="LanlinkGuiExe" />
+            </Feature>
+        </Feature>
 
         <!-- Fail fast with a readable message if the service exe goes missing. -->
         <Property Id="ARPNOMODIFY" Value="1" />

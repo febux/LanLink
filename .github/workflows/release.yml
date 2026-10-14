@@ -20,11 +20,11 @@ jobs:
       - name: Install Debian packaging tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y dpkg-dev fakeroot
-      - name: Build .deb
+          sudo apt-get install -y dpkg-dev fakeroot libwebkit2gtk-4.1-dev
+      - name: Build .deb with desktop GUI
         run: |
           cargo fetch
-          fakeroot bash dist/deb/build-deb.sh
+          fakeroot bash dist/deb/build-deb.sh --with-gui
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
         with:
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install build dependencies
         run: |
-          dnf install -y rpm-build cargo git nftables iproute systemd-rpm-macros
+          dnf install -y rpm-build cargo git nftables iproute systemd-rpm-macros webkit2gtk4.1-devel
       - name: Build .rpm
         run: |
           set -x
@@ -67,10 +67,11 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - name: Install WiX
         run: dotnet tool install --global wix
-      - name: Build .msi
+      - name: Build .msi with desktop GUI
         shell: bash
         env:
           WIX_EULA_ID: wix7
+          LL_GUI: all
         run: |
           export PATH="$PATH:$HOME/.dotnet/tools"
           bash dist/windows/build-msi.sh
@@ -98,10 +99,107 @@ jobs:
           path: dist/macos/out/*.pkg
           if-no-files-found: error
 
+  build-tarball:
+    name: Build portable Linux tarball
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross-compilation deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Build tarball
+        env:
+          TARGET: ${{ matrix.target }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: bash dist/tarball/build-tarball.sh
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lanlink-tarball-${{ matrix.target }}
+          path: dist/tarball/out/*.tar.gz
+          if-no-files-found: error
+
+  build-appimage:
+    name: Build AppImage
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --locked
+      - name: Build AppImage
+        run: bash dist/appimage/build-appimage.sh
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lanlink-appimage
+          path: dist/appimage/out/*.AppImage
+          if-no-files-found: error
+
+  build-flatpak:
+    name: Build Flatpak
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y org.gnome.Platform//46 org.gnome.Sdk//46
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build Flatpak
+        run: bash dist/flatpak/build-flatpak.sh
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lanlink-flatpak
+          path: dist/flatpak/out/*.flatpak
+          if-no-files-found: warn
+
+  build-snap:
+    name: Build Snap
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install snapcraft
+        uses: samuelmeuli/action-snapcraft@v3
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build Snap
+        run: |
+          sudo snapcraft --use-lxd --project-dir dist/snap || snapcraft --use-lxd --project-dir dist/snap
+      - name: Upload Snap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lanlink-snap
+          path: dist/snap/*.snap
+          if-no-files-found: warn
+
   release:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-deb, build-rpm, build-msi, build-pkg]
+    needs: [build-deb, build-rpm, build-msi, build-pkg, build-tarball, build-appimage, build-flatpak, build-snap]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -114,7 +212,7 @@ jobs:
       - name: Flatten artifacts for upload
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.pkg' \) -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.pkg' -o -name '*.tar.gz' -o -name '*.AppImage' -o -name '*.flatpak' -o -name '*.snap' \) -exec cp {} release/ \;
           ls -la release/
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
