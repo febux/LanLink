@@ -237,10 +237,12 @@ fn bind_listener(path: &PathBuf) -> std::io::Result<tokio::net::UnixListener> {
     // Remove a stale socket left by a crashed previous run.
     let _ = std::fs::remove_file(path);
     let listener = tokio::net::UnixListener::bind(path)?;
-    // Restrict to owner + group (root:lanlink in production; the running user
-    // in dev). The data exposed is operational status, not secrets, but it
-    // still should not be world-readable.
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660));
+    // Make the socket world-connectable so desktop/TUI/Web frontends running as
+    // the normal interactive user can reach the daemon without requiring the
+    // user to be in the lanlink group. The data exposed is read-only
+    // operational status (peer list, virtual IPs, counters); it contains no
+    // secrets.
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666));
     Ok(listener)
 }
 

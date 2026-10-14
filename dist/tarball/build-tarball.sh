@@ -183,29 +183,6 @@ chmod 0640 /etc/lanlink/lanlinkd.example.toml 2>/dev/null || true
 systemctl daemon-reload
 echo "LanLink installed to ${PREFIX}/bin"
 echo "Next: lanlinkd service up <network-name>"
-
-# Group membership warning
-_TARGET_USER=""
-if [ -n "${SUDO_USER:-}" ]; then
-  _TARGET_USER="${SUDO_USER}"
-elif [ "$(id -u)" -ne 0 ]; then
-  _TARGET_USER="$(id -un)"
-fi
-if [ -n "${_TARGET_USER}" ] && ! id -nG "${_TARGET_USER}" 2>/dev/null | grep -qw lanlink; then
-  echo ""
-  echo "╔════════════════════════════════════════════════════════════════════╗"
-  echo "║  ACTION REQUIRED: add user to the 'lanlink' group                 ║"
-  echo "╠════════════════════════════════════════════════════════════════════╣"
-  echo "║  Run:  sudo usermod -aG lanlink ${_TARGET_USER}"
-  echo "║  Then either:                                                      ║"
-  echo "║    • log out and log back in (permanent for all apps)             ║"
-  echo "║    • run:  newgrp lanlink   (temporary, current shell only)       ║"
-  echo "║                                                                    ║"
-  echo "║  Without this, lanlink-desktop/tui/web cannot connect to the      ║"
-  echo "║  daemon status socket at /run/lanlink/lanlinkd-*.sock.            ║"
-  echo "╚════════════════════════════════════════════════════════════════════╝"
-  echo ""
-fi
 EOF
 chmod 0755 "${STAGE}/lanlink-${VERSION}-${ARCH}/install-local.sh"
 
