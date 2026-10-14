@@ -2,6 +2,8 @@ app-id: com.lanlink.LanLink
 runtime: org.gnome.Platform
 runtime-version: "46"
 sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
 command: lanlink-desktop
 finish-args:
   - --share=network
@@ -10,6 +12,8 @@ finish-args:
   - --socket=wayland
   - --socket=fallback-x11
   - --share=ipc
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
 modules:
   - name: lanlink
     buildsystem: simple

@@ -130,7 +130,7 @@ build-flatpak: ## Build Flatpak bundle
 	bash $(BUILD_FLATPAK)
 
 build-snap: ## Build Snap package
-	snapcraft --use-lxd --project-dir dist/snap
+	snapcraft pack dist/snap --use-lxd
 
 dist: ## Build all distribution packages available on this host
 	$(MAKE) build-deb || true

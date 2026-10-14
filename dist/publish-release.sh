@@ -251,7 +251,7 @@ build_snap() {
     return 0
   fi
   echo "[publish] building Snap"
-  snapcraft --use-lxd --project-dir "${SCRIPT_DIR}/snap"
+  snapcraft pack "${SCRIPT_DIR}/snap" --use-lxd
   for f in "${SCRIPT_DIR}/snap"/*.snap; do
     if [ -f "$f" ]; then
       ARTIFACTS+=("$f")

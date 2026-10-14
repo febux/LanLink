@@ -112,10 +112,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install cross-compilation deps
+      - name: Install cross-compilation and desktop build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config libglib2.0-dev libssl-dev libwebkit2gtk-4.1-dev
       - name: Build tarball
         env:
           TARGET: ${{ matrix.target }}
@@ -188,7 +188,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Build Snap
         run: |
-          sudo snapcraft --use-lxd --project-dir dist/snap || snapcraft --use-lxd --project-dir dist/snap
+          sudo snapcraft pack dist/snap --use-lxd || snapcraft pack dist/snap --use-lxd
       - name: Upload Snap artifact
         uses: actions/upload-artifact@v4
         with:
