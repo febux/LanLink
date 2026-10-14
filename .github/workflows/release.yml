@@ -124,10 +124,31 @@ jobs:
           path: dist/appimage/out/*.AppImage
           if-no-files-found: error
 
+  build-tarball:
+    name: Build portable Linux tarball
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev
+      - name: Build portable tarball with all GUI front-ends
+        run: bash dist/tarball/build-tarball.sh
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lanlink-tarball
+          path: dist/tarball/out/*.tar.gz
+          if-no-files-found: error
+
   release:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-deb, build-rpm, build-msi, build-pkg, build-appimage]
+    needs: [build-deb, build-rpm, build-msi, build-pkg, build-appimage, build-tarball]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -140,7 +161,7 @@ jobs:
       - name: Flatten artifacts for upload
         run: |
           mkdir -p release
-          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.pkg' -o -name '*.AppImage' \) -exec cp {} release/ \;
+          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.pkg' -o -name '*.AppImage' -o -name '*.tar.gz' \) -exec cp {} release/ \;
           ls -la release/
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
