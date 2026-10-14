@@ -1,10 +1,20 @@
-.PHONY: check test fmt clippy clean run-daemon run-coordinator gui dev web dist-deb dist-rpm dist-msi dist-pkg dist-publish dist-clean
+.PHONY: check test fmt clippy clean run-daemon run-coordinator gui dev web dist-deb dist-rpm dist-msi dist-pkg dist-publish dist-clean bump-version
 
 # Default GUI mode for `make gui` (tui, web, or desktop).
 MODE ?= tui
 
 # Version used by distribution builds (default: read from Cargo.toml).
 VERSION ?= $(shell awk -F'"' '/^version =/{print $$2; exit}' Cargo.toml)
+
+# Bump the workspace version. Usage: make bump-version VERSION=0.3.0
+bump-version:
+ifndef VERSION
+	$(error VERSION is required (e.g., make bump-version VERSION=0.3.0))
+endif
+	@echo "Bumping workspace version to $(VERSION)"
+	sed -i.bak -E '/^\[workspace\.package\]/,/^\[/ s/^version = "[^"]*"/version = "$(VERSION)"/' Cargo.toml
+	rm -f Cargo.toml.bak
+	cargo update --workspace
 
 check:
 	cargo check --workspace
