@@ -100,10 +100,10 @@ cargo test --workspace
 
 # One command: build everything, start the coordinator, start the daemon
 # as root, and open the TUI. Press 'q' or Ctrl-C in the TUI to stop all.
-make dev
+make run-tui
 
 # Same one-command flow, but opens the browser-based WebUI:
-make web
+make run-web
 # Or with flags:
 # make web LL_DEV_WEB_BIND=0.0.0.0:8686
 # bash scripts/gui-start.sh --mode web --release --no-browser
@@ -184,7 +184,7 @@ unprivileged user:
 
 ```bash
 # One command: start coordinator + daemon (as root) + WebUI and open the browser.
-make web
+make run-web
 
 # Or start only the WebUI after the coordinator and daemon are already running:
 cargo run -p lanlink-web

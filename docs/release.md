@@ -69,6 +69,8 @@ Run `make dist-publish VERSION=0.2.0` on:
 - a macOS host (produces `.pkg`)
 - a Windows host (produces `.msi`)
 
+For the CI-only tag push path, use `make dist-publish-ci VERSION=0.2.0` instead.
+
 ### Option B: CI matrix + one upload job
 
 1. Build each artifact in a CI matrix job on the appropriate runner.
@@ -94,11 +96,12 @@ Run `make dist-publish VERSION=0.2.0` on:
 ## Manual per-platform builds
 
 ```bash
-make dist-deb       # Debian/Ubuntu package
-make dist-rpm       # Fedora/RHEL package
-make dist-pkg       # macOS installer
-make dist-msi       # Windows installer
-make dist-clean     # remove build trees
+make build-deb       # Debian/Ubuntu package
+make build-rpm       # Fedora/RHEL package
+make build-pkg       # macOS installer
+make build-msi       # Windows installer
+make dist            # build all packages the host can produce
+make dist-clean      # remove build trees
 ```
 
 ## Troubleshooting

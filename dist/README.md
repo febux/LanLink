@@ -5,11 +5,11 @@ from the workspace root with `make` or the per-platform scripts.
 
 | Platform | Mechanism | Entry point |
 |---|---|---|
-| Linux (Debian/Ubuntu) | `.deb` + systemd | `dist/deb/build-deb.sh` or `make dist-deb` |
-| Linux (Fedora/RHEL) | `.rpm` + systemd | `dist/rpm/build-rpm.sh` or `make dist-rpm` |
+| Linux (Debian/Ubuntu) | `.deb` + systemd | `dist/deb/build-deb.sh` or `make build-deb` |
+| Linux (Fedora/RHEL) | `.rpm` + systemd | `dist/rpm/build-rpm.sh` or `make build-rpm` |
 | Linux (Arch) | AUR | `dist/aur/PKGBUILD` |
-| macOS | `.pkg` + launchd | `dist/macos/build-pkg.sh` or `make dist-pkg` |
-| Windows | MSI (WiX) + Windows service | `dist/windows/build-msi.sh` or `make dist-msi` |
+| macOS | `.pkg` + launchd | `dist/macos/build-pkg.sh` or `make build-pkg` |
+| Windows | MSI (WiX) + Windows service | `dist/windows/build-msi.sh` or `make build-msi` |
 | Any | systemd units only | `dist/systemd/` |
 | All | GitHub Releases | `dist/publish-release.sh` or `make dist-publish` |
 
@@ -44,20 +44,25 @@ Missing platform toolchains are skipped with a warning. Run the script on each
 platform (or in CI matrix jobs) and re-run `make dist-publish PUBLISH_OPTS="--skip-build"` to
 collect and upload every artifact under one release.
 
+For the CI-only tag push path, use `make dist-publish-ci VERSION=0.2.0`.
+
 ## Building the .deb with GUI front-ends
 
 ```sh
 # Terminal UI
-make dist-deb LL_GUI=tui
+make build-deb LL_GUI=tui
 
 # Browser WebUI
-make dist-deb LL_GUI=web
+make build-deb LL_GUI=web
 
 # Native desktop UI (requires webkit2gtk headers)
-make dist-deb LL_GUI=desktop
+make build-deb LL_GUI=desktop
 
 # All front-ends
-make dist-deb LL_GUI=all
+make build-deb LL_GUI=all
+
+# Build every package the host can produce
+make dist
 ```
 
 ## What gets installed (Linux)

@@ -31,9 +31,9 @@ You can optionally include one or more GUI front-ends:
 
 ```bash
 # Debian / Ubuntu — build a .deb with the front-end you want, then install it
-make dist-deb LL_GUI=tui   && sudo dpkg -i dist/deb/out/lanlink_*_amd64.deb
-make dist-deb LL_GUI=web   && sudo dpkg -i dist/deb/out/lanlink_*_amd64.deb
-make dist-deb LL_GUI=all   && sudo dpkg -i dist/deb/out/lanlink_*_amd64.deb
+make build-deb LL_GUI=tui   && sudo dpkg -i dist/deb/out/lanlink_*_amd64.deb
+make build-deb LL_GUI=web   && sudo dpkg -i dist/deb/out/lanlink_*_amd64.deb
+make build-deb LL_GUI=all   && sudo dpkg -i dist/deb/out/lanlink_*_amd64.deb
 
 # Arch Linux — build and install from the AUR with the front-end you want
 cd dist/aur && LL_GUI=tui   makepkg -si
@@ -53,19 +53,22 @@ Run this from the repository root:
 
 ```bash
 # Default package: daemon + CLI + coordinator + relay
-make dist-deb
+make build-deb
 
 # Add the terminal UI
-make dist-deb LL_GUI=tui
+make build-deb LL_GUI=tui
 
 # Add the browser WebUI
-make dist-deb LL_GUI=web
+make build-deb LL_GUI=web
 
 # Add the native desktop UI
-make dist-deb LL_GUI=desktop
+make build-deb LL_GUI=desktop
 
 # Install all front-ends at once
-make dist-deb LL_GUI=all
+make build-deb LL_GUI=all
+
+# Build every package the host can produce (deb, rpm, msi, pkg)
+make dist
 ```
 
 You can also pass flags directly to the build script instead of using `make`:
@@ -190,11 +193,11 @@ make gui MODE=desktop
 
 | Selector | Debian / Ubuntu | Arch Linux | What is built |
 |---|---|---|---|
-| (none) | `make dist-deb` | `makepkg -si` | Core only |
-| TUI | `make dist-deb LL_GUI=tui` | `LL_GUI=tui makepkg -si` | `lanlink-tui` + `lanlink-gui` |
-| WebUI | `make dist-deb LL_GUI=web` | `LL_GUI=web makepkg -si` | `lanlink-web` + `lanlink-gui` |
-| Desktop | `make dist-deb LL_GUI=desktop` | `LL_GUI=desktop makepkg -si` | `lanlink-desktop` + `lanlink-gui` |
-| All | `make dist-deb LL_GUI=all` | `LL_GUI=all makepkg -si` | All front-ends + `lanlink-gui` |
+| (none) | `make build-deb` | `makepkg -si` | Core only |
+| TUI | `make build-deb LL_GUI=tui` | `LL_GUI=tui makepkg -si` | `lanlink-tui` + `lanlink-gui` |
+| WebUI | `make build-deb LL_GUI=web` | `LL_GUI=web makepkg -si` | `lanlink-web` + `lanlink-gui` |
+| Desktop | `make build-deb LL_GUI=desktop` | `LL_GUI=desktop makepkg -si` | `lanlink-desktop` + `lanlink-gui` |
+| All | `make build-deb LL_GUI=all` | `LL_GUI=all makepkg -si` | All front-ends + `lanlink-gui` |
 
 ### Debian-only script flags
 

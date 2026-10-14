@@ -52,7 +52,7 @@ The MSI (`dist/windows/lanlink.wxs` + `build-msi.sh`, WiX v4+) installs:
 Build from the repo root (on Windows, or on Linux/macOS with `cargo-xwin`):
 
 ```
-make dist-msi                       # or: bash dist/windows/build-msi.sh
+make build-msi                       # or: bash dist/windows/build-msi.sh
 ```
 
 The script stages the binaries, bundles `wintun.dll` (downloaded from
