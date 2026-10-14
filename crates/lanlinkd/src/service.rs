@@ -158,9 +158,19 @@ async fn install() -> anyhow::Result<()> {
     if !std::path::Path::new(platform::CONFIG_DIR).exists() {
         std::fs::create_dir_all(platform::CONFIG_DIR)?;
     }
-    let existing = std::fs::read_to_string(platform::UNIT_PATH).unwrap_or_default();
-    if existing != platform::UNIT {
-        tokio::fs::write(platform::UNIT_PATH, platform::UNIT).await?;
+    let unit_text = std::fs::read_to_string(platform::UNIT_PATH).unwrap_or_default();
+    // Rewrite ExecStart path to match wherever the current lanlinkd binary is installed.
+    let bin_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
+    let bin_path = bin_dir.join("lanlinkd");
+    let rewritten = platform::UNIT.replace(
+        "/usr/bin/lanlinkd",
+        &bin_path.to_string_lossy(),
+    );
+    if unit_text != rewritten {
+        tokio::fs::write(platform::UNIT_PATH, rewritten).await?;
     }
     run_cmd("systemctl", &["daemon-reload"]).await?;
     println!("systemd unit installed: {}", platform::UNIT_PATH);
