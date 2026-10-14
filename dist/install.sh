@@ -149,12 +149,13 @@ download() {
   fi
   log "downloading ${url}"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o "${out}" "${url}"
+    curl -fsSL -o "${out}" "${url}" || die "failed to download ${url} (asset missing or network issue)"
   elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "${out}" "${url}"
+    wget -q -O "${out}" "${url}" || die "failed to download ${url} (asset missing or network issue)"
   else
     die "curl or wget is required"
   fi
+  [ -s "${out}" ] || die "downloaded file is empty: ${out}"
 }
 
 install_deb() {
