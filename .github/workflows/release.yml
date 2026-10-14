@@ -105,7 +105,11 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            gui: all
+          - target: aarch64-unknown-linux-gnu
+            gui: ""
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -115,11 +119,15 @@ jobs:
       - name: Install cross-compilation and desktop build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config libglib2.0-dev libssl-dev libwebkit2gtk-4.1-dev
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+          sudo apt-get install -y pkg-config libglib2.0-dev libssl-dev libwebkit2gtk-4.1-dev
       - name: Build tarball
         env:
           TARGET: ${{ matrix.target }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          LL_GUI: ${{ matrix.gui }}
         run: bash dist/tarball/build-tarball.sh
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
@@ -164,7 +172,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y flatpak flatpak-builder
           sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-          sudo flatpak install -y org.gnome.Platform//46 org.gnome.Sdk//46
+          sudo flatpak install -y \
+            org.gnome.Platform//46 \
+            org.gnome.Sdk//46 \
+            org.freedesktop.Sdk.Extension.rust-stable//46
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Build Flatpak
@@ -187,8 +198,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Build Snap
+        working-directory: dist/snap
         run: |
-          sudo snapcraft pack dist/snap --use-lxd || snapcraft pack dist/snap --use-lxd
+          sudo snapcraft --use-lxd || snapcraft --use-lxd
       - name: Upload Snap artifact
         uses: actions/upload-artifact@v4
         with:
