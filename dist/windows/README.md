@@ -61,8 +61,10 @@ The MSI (`dist/windows/lanlink.wxs` + `build-msi.sh`, WiX v4+) installs:
 
 - `C:\Program Files\LanLink\` — all binaries (`lanlinkd.exe`, `lanlinkctl.exe`,
   optional GUI binaries, `wintun.dll`) and adds the dir to the system `PATH`
-- `C:\ProgramData\LanLink\lanlinkd.example.toml` — never overwrites an
-  operator-edited `lanlinkd.toml`
+- `C:\ProgramData\LanLink\lanlinkd.example.toml` — reference example
+- `C:\ProgramData\LanLink\lanlinkd.toml` — default live config the service
+  reads; written only if absent, never overwritten on upgrade/repair (edit it
+  to set your coordinator, network id and password), removed on uninstall
 - the `LanLinkDaemon` Windows service (auto-start, LocalSystem), started on
   install and fully removed on uninstall
 - a Start Menu shortcut for `lanlink-desktop.exe` when the desktop GUI is

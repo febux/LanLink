@@ -14,7 +14,7 @@
 
       Contents:
         - C:\Program Files\LanLink\            binaries
-        - C:\ProgramData\LanLink\            example config
+        - C:\ProgramData\LanLink\            example + default (live) config
         - LanLinkDaemon Windows service      auto-start, LocalSystem
         - Optional Start Menu shortcut for the desktop UI
 
@@ -55,6 +55,7 @@
                         DisplayName="LanLink Virtual LAN Daemon"
                         Description="Cross-platform layer-2 mesh VPN daemon (Radmin VPN-style). Creates the virtual Ethernet adapter and forwards encrypted frames peer-to-peer."
                         Type="ownProcess"
+                        Arguments="service run"
                         Start="auto"
                         ErrorControl="normal"
                         Vital="yes" />
@@ -130,6 +131,18 @@
                           Source="dist/lanlinkd.example.toml"
                           KeyPath="yes" />
                 </Component>
+                <!-- Default live config the service reads
+                     (CONFIG_PATH in service.rs). NeverOverwrite keeps
+                     operator edits intact across upgrades and repairs;
+                     the file is only laid down when absent. -->
+                <Component Id="LiveConfig" Guid="d41c8f22-9b53-4e77-8a10-6c2f1d0b7a94" NeverOverwrite="yes">
+                    <File Id="lanlinkd.toml"
+                          Source="dist/windows/lanlinkd.toml"
+                          KeyPath="yes" />
+                    <RemoveFile Id="RemoveLiveConfig"
+                                Name="lanlinkd.toml"
+                                On="uninstall" />
+                </Component>
             </Directory>
         </StandardDirectory>
 
@@ -161,6 +174,7 @@
             <ComponentRef Id="PathEnv" />
             <ComponentRef Id="Docs" />
             <ComponentRef Id="ExampleConfig" />
+            <ComponentRef Id="LiveConfig" />
 
             <Feature Id="TuiFeature" Title="Terminal UI" Level="1" AllowAdvertise="no">
                 <ComponentRef Id="LanlinkTuiExe" />
