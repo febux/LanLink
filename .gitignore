@@ -16,3 +16,9 @@ dist/*/root/
 dist/*/stage/
 dist/rpm/build.log
 dist/rpm/rpmbuild/
+.cursor/
+.hermes/skills/
+.omp/
+.opencode/
+.qwen/
+.zcode/
