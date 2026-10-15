@@ -1,4 +1,16 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <?ifndef IncludeTui ?>
+    <?define IncludeTui = 0 ?>
+    <?endif?>
+    <?ifndef IncludeWeb ?>
+    <?define IncludeWeb = 0 ?>
+    <?endif?>
+    <?ifndef IncludeDesktop ?>
+    <?define IncludeDesktop = 0 ?>
+    <?endif?>
+    <?ifndef VCRedistExe ?>
+    <?define VCRedistExe = 0 ?>
+    <?endif?>
     <!--
       LanLink Windows MSI (WiX v4/v5).
 
@@ -13,12 +25,11 @@
           -o dist/windows/out/lanlink-0.1.0-x64.msi
 
       Contents:
-        - C:\Program Files\LanLink\            binaries
-        - C:\ProgramData\LanLink\            example + default (live) config
+        - C:\Program Files\LanLink\            binaries + default (live) config
         - LanLinkDaemon Windows service      auto-start, LocalSystem
         - Optional Start Menu shortcut for the desktop UI
 
-      The service reads its config from C:\ProgramData\LanLink\lanlinkd.toml
+      The service reads its config from C:\Program Files\LanLink\lanlinkd.toml
       (hardcoded in crates/lanlinkd/src/service.rs).
     -->
     <Package
@@ -38,10 +49,13 @@
         <Property Id="ARPCOMMENTS" Value="LanLink virtual LAN daemon and GUI (Radmin VPN-style mesh VPN for gaming and remote access)." />
         <Property Id="ARPURLINFOABOUT" Value="https://github.com/lanlink/lanlink" />
 
-        <!-- Feature toggles passed in via -d IncludeTui=1 etc. -->
-        <Property Id="IncludeTui" Value="0" />
-        <Property Id="IncludeWeb" Value="0" />
-        <Property Id="IncludeDesktop" Value="0" />
+        <!-- Feature toggles passed in via -d IncludeTui=1 etc. WiX 4+
+             preprocessor variables are NOT MSI properties (verified with
+             `wix msi decompile`), so each toggle is bound explicitly here;
+             the defaults above keep `wix build` working without any -d. -->
+        <Property Id="IncludeTui" Value="$(var.IncludeTui)" />
+        <Property Id="IncludeWeb" Value="$(var.IncludeWeb)" />
+        <Property Id="IncludeDesktop" Value="$(var.IncludeDesktop)" />
 
         <!-- Install directory: C:\Program Files\LanLink -->
         <StandardDirectory Id="ProgramFiles64Folder">
@@ -59,26 +73,19 @@
                         Start="auto"
                         ErrorControl="normal"
                         Vital="yes" />
-                    <!-- DEBUG ONLY: build with -d DebugNoAutostart=1 to omit
-                         Start="install" so the MSI never starts the service
-                         (no 1920/rollback; files stay on disk for manual
-                         `sc start LanLinkDaemon` debugging). -->
-                    <?ifndef DebugNoAutostart?>
-                    <ServiceControl
-                        Id="LanLinkDaemonControl"
-                        Name="LanLinkDaemon"
-                        Start="install"
-                        Stop="both"
-                        Remove="uninstall"
-                        Wait="yes" />
-                    <?else?>
+                    <!-- Do NOT start the service during install. The default
+                         C:\Program Files\LanLink\lanlinkd.toml references a
+                         network secret that does not exist yet, so an immediate
+                         start fails with error 1920 and rolls back the MSI.
+                         The service is still registered as automatic; the user
+                         starts it after configuring the network, e.g.
+                         lanlinkd service up name=gaming password=s3cret. -->
                     <ServiceControl
                         Id="LanLinkDaemonControl"
                         Name="LanLinkDaemon"
                         Stop="both"
                         Remove="uninstall"
                         Wait="yes" />
-                    <?endif?>
                 </Component>
 
                 <!-- CLI -->
@@ -100,6 +107,17 @@
                 <Component Id="WintunDll" Guid="fce1e4bb-cf9d-430e-83ce-ec3ed08fe53f">
                     <File Id="wintun.dll" Source="$(var.StageDir)/wintun.dll" KeyPath="yes" />
                 </Component>
+
+                <?if $(var.VCRedistExe) = 1 ?>
+                <!-- Microsoft Visual C++ Redistributable (x64). Bundled so
+                     the Rust binaries run on a clean Windows machine without a
+                     separate redist download. Authored only when the build
+                     script passes -d VCRedistExe=1 (and stages the exe), so
+                     offline builds work without the download. -->
+                <Component Id="Vcruntime" Guid="a1b2c3d4-e5f6-7890-abcd-ef012345678a">
+                    <File Id="vc_redist.x64.exe" Source="$(var.StageDir)/vc_redist.x64.exe" KeyPath="yes" />
+                </Component>
+                <?endif?>
 
                 <!-- Optional GUI front-ends -->
                 <Component Id="LanlinkTuiExe" Guid="a1b2c3d4-e5f6-7890-abcd-ef0123456789" Condition="IncludeTui = 1">
@@ -131,19 +149,7 @@
                 <Component Id="Docs" Guid="71b936a3-c1f6-4407-b141-9d8680293593">
                     <File Id="windows_readme.md" Source="dist/windows/README.md" />
                 </Component>
-            </Directory>
-        </StandardDirectory>
 
-        <!-- Config directory: C:\ProgramData\LanLink -->
-        <StandardDirectory Id="CommonAppDataFolder">
-            <Directory Name="LanLink">
-                <!-- Only ever ships the example config; an operator-edited
-                     lanlinkd.toml is never touched by install/upgrade/remove. -->
-                <Component Id="ExampleConfig" Guid="a865143b-c126-4565-93cc-5324a07b559f">
-                    <File Id="lanlinkd.example.toml"
-                          Source="dist/lanlinkd.example.toml"
-                          KeyPath="yes" />
-                </Component>
                 <!-- Default live config the service reads
                      (CONFIG_PATH in service.rs). NeverOverwrite keeps
                      operator edits intact across upgrades and repairs;
@@ -155,6 +161,13 @@
                     <RemoveFile Id="RemoveLiveConfig"
                                 Name="lanlinkd.toml"
                                 On="uninstall" />
+                </Component>
+
+                <!-- Example reference config. -->
+                <Component Id="ExampleConfig" Guid="a865143b-c126-4565-93cc-5324a07b559f">
+                    <File Id="lanlinkd.example.toml"
+                          Source="dist/lanlinkd.example.toml"
+                          KeyPath="yes" />
                 </Component>
             </Directory>
         </StandardDirectory>
@@ -184,6 +197,9 @@
             <ComponentRef Id="LanlinkRelaydExe" />
             <ComponentRef Id="LanlinkCoordinatorExe" />
             <ComponentRef Id="WintunDll" />
+            <?if $(var.VCRedistExe) = 1 ?>
+            <ComponentRef Id="Vcruntime" />
+            <?endif?>
             <ComponentRef Id="PathEnv" />
             <ComponentRef Id="Docs" />
             <ComponentRef Id="ExampleConfig" />
@@ -203,6 +219,33 @@
                 <ComponentRef Id="LanlinkGuiExe" />
             </Feature>
         </Feature>
+
+        <!-- Run the bundled VC++ redist silently before installing the
+             service so VCRUNTIME140.dll is present on clean Windows VMs.
+
+             Extension-free on purpose: no WixUtilExtension (WixQuietExec)
+             is needed, so both native WiX and the Docker fallback build
+             this without -ext. Skipped on repair/uninstall and when
+             vcruntime140.dll already exists (AppSearch guard), which also
+             avoids failing on redist exit code 1638 ("newer version
+             already installed"). Return="ignore" tolerates exit 3010
+             (success, reboot required). If the redist still fails, the exe
+             stays in INSTALLDIR and can be re-run by hand. -->
+        <Property Id="VCRUNTIME140_PRESENT">
+            <DirectorySearch Id="VcruntimeSearch" Path="[System64Folder]" Depth="0">
+                <FileSearch Id="Vcruntime140File" Name="vcruntime140.dll" />
+            </DirectorySearch>
+        </Property>
+        <CustomAction Id="RunVCRedist"
+                      Directory="INSTALLDIR"
+                      ExeCommand="&quot;[INSTALLDIR]vc_redist.x64.exe&quot; /install /quiet /norestart"
+                      Execute="deferred"
+                      Impersonate="no"
+                      Return="ignore" />
+        <InstallExecuteSequence>
+            <Custom Action="RunVCRedist" Before="InstallServices"
+                    Condition="$(var.VCRedistExe) = 1 AND NOT Installed AND NOT VCRUNTIME140_PRESENT" />
+        </InstallExecuteSequence>
 
         <!-- Fail fast with a readable message if the service exe goes missing. -->
         <Property Id="ARPNOMODIFY" Value="1" />

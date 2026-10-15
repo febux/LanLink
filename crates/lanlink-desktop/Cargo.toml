@@ -18,6 +18,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 serde.workspace = true
 serde_json = "1"
+# Windows status-socket discovery reads the daemon config's [status] table.
+toml.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true

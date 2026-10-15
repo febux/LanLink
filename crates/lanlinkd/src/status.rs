@@ -1,6 +1,10 @@
-//! Local read-only status API for `lanlinkd`, served over a Unix domain
-//! socket (named pipe equivalent is stubbed on Windows until the Wintun
-//! backend lands).
+//! Local read-only status API for `lanlinkd`.
+//!
+//! - On Unix: served over a Unix domain socket at
+//!   `/run/lanlink/lanlinkd-<network_id>.sock` (with a `/tmp` fallback).
+//! - On Windows: served over a TCP loopback socket at `127.0.0.1:<port>`,
+//!   where the default port is `9000 + network_id`. Override with the
+//!   `status.socket` config value, e.g. `"127.0.0.1:19501"`.
 //!
 //! The socket speaks newline-delimited JSON: one [`StatusRequest`] per line
 //! in, one [`lanlink_proto::status::StatusResponse`] per line out. Multiple
@@ -12,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,14 +28,40 @@ use tokio::sync::Mutex;
 
 use crate::Metrics;
 
-/// Default socket location for a joined network (root-created, mode 0660).
+/// Default Unix socket path for a joined network (root-created, mode 0660).
+#[cfg(unix)]
 fn default_socket_path(network_id: u64) -> PathBuf {
     PathBuf::from(format!("/run/lanlink/lanlinkd-{network_id}.sock"))
 }
 
 /// Unprivileged fallback used when `/run/lanlink` cannot be created (dev).
+#[cfg(unix)]
 fn fallback_socket_path(network_id: u64) -> PathBuf {
     PathBuf::from(format!("/tmp/lanlinkd-{network_id}.sock"))
+}
+
+/// Default Windows TCP loopback address for a joined network.
+#[cfg(windows)]
+fn default_tcp_addr(network_id: u64) -> SocketAddr {
+    // Port 9000 collides with the default data-plane UDP bind, so offset by
+    // the network id to give each network a distinct status port.
+    SocketAddr::from(([127, 0, 0, 1], (9000u16 + network_id as u16)))
+}
+
+/// Parse a user-supplied `status.socket` value. On Unix it is a filesystem path.
+/// On Windows it may be a `host:port` string; if it parses as a path without
+/// a port, treat it as a TCP address by deriving the port from `network_id`.
+#[cfg(windows)]
+fn parse_status_addr(configured: Option<String>, network_id: u64) -> Vec<SocketAddr> {
+    if let Some(value) = configured {
+        if let Ok(addr) = value.parse::<SocketAddr>() {
+            return vec![addr];
+        }
+        if let Ok(port) = value.parse::<u16>() {
+            return vec![SocketAddr::from(([127, 0, 0, 1], port))];
+        }
+    }
+    vec![default_tcp_addr(network_id)]
 }
 
 /// Static info about this daemon run, set once after a successful join.
@@ -201,37 +232,59 @@ fn classify_path(
     }
 }
 
-/// Bind the status listener, trying the configured path (or the default with
-/// a `/tmp` fallback). Spawns the accept loop; failure is logged and the
-/// daemon continues without a status API.
+/// Bind the status listener and spawn the accept loop. Failure is logged and
+/// the daemon continues without a status API.
 pub async fn spawn_server(configured: Option<String>, network_id: u64, state: StatusState) {
-    let candidates: Vec<PathBuf> = match configured {
-        Some(p) => vec![PathBuf::from(p)],
-        None => vec![
-            default_socket_path(network_id),
-            fallback_socket_path(network_id),
-        ],
-    };
+    #[cfg(unix)]
+    {
+        let candidates: Vec<PathBuf> = match configured {
+            Some(p) => vec![PathBuf::from(p)],
+            None => vec![
+                default_socket_path(network_id),
+                fallback_socket_path(network_id),
+            ],
+        };
 
-    tokio::spawn(async move {
-        for path in candidates {
-            match bind_listener(&path) {
-                Ok(listener) => {
-                    tracing::info!(path = %path.display(), "status socket listening");
-                    run_server(listener, &path, state).await;
-                    return;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "status socket bind failed"
-                    );
+        tokio::spawn(async move {
+            for path in candidates {
+                match bind_listener(&path) {
+                    Ok(listener) => {
+                        tracing::info!(path = %path.display(), "status socket listening");
+                        run_server(listener, &path, state).await;
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "status socket bind failed"
+                        );
+                    }
                 }
             }
-        }
-        tracing::warn!("status server disabled: no usable socket path");
-    });
+            tracing::warn!("status server disabled: no usable socket path");
+        });
+    }
+
+    #[cfg(windows)]
+    {
+        let candidates = parse_status_addr(configured, network_id);
+        tokio::spawn(async move {
+            for addr in candidates {
+                match tokio::net::TcpListener::bind(addr).await {
+                    Ok(listener) => {
+                        tracing::info!(%addr, "status TCP listener bound");
+                        run_tcp_server(listener, addr, state).await;
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(%addr, error = %e, "status TCP bind failed");
+                    }
+                }
+            }
+            tracing::warn!("status server disabled: no usable TCP address");
+        });
+    }
 }
 
 #[cfg(unix)]
@@ -310,19 +363,63 @@ async fn handle_conn(stream: tokio::net::UnixStream, state: StatusState) {
     }
 }
 
-#[cfg(not(unix))]
-struct DummyListener;
-
-#[cfg(not(unix))]
-fn bind_listener(_path: &PathBuf) -> std::io::Result<DummyListener> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "status socket is not supported on this platform yet",
-    ))
+#[cfg(windows)]
+async fn run_tcp_server(listener: tokio::net::TcpListener, addr: SocketAddr, state: StatusState) {
+    loop {
+        tokio::select! {
+            _ = crate::shutdown().wait() => {
+                tracing::debug!("status TCP server stopping");
+                break;
+            }
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((stream, _)) => {
+                        let state = state.clone();
+                        tokio::spawn(handle_tcp_conn(stream, state));
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "status TCP accept failed");
+                    }
+                }
+            }
+        }
+    }
+    let _ = addr;
 }
 
-#[cfg(not(unix))]
-async fn run_server(_listener: DummyListener, _path: &PathBuf, _state: StatusState) {}
+#[cfg(windows)]
+async fn handle_tcp_conn(stream: tokio::net::TcpStream, state: StatusState) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (reader_half, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader_half);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+
+        let response =
+            match serde_json::from_str::<lanlink_proto::status::StatusRequest>(line.trim_end()) {
+                Ok(lanlink_proto::status::StatusRequest::Snapshot) => {
+                    StatusResponse::Snapshot(state.snapshot().await)
+                }
+                Err(e) => StatusResponse::Error {
+                    error: format!("bad request: {e}"),
+                },
+            };
+
+        let mut out = serde_json::to_string(&response)
+            .unwrap_or_else(|_| "{\"error\":\"snapshot encode failed\"}".to_string());
+        out.push('\n');
+        if writer.write_all(out.as_bytes()).await.is_err() {
+            break;
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -473,6 +570,76 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// Parse rules for the Windows `status.socket` value: a `host:port`
+    /// string wins, a bare port binds loopback, anything else falls back to
+    /// the `9000 + network_id` default.
+    #[cfg(windows)]
+    #[test]
+    fn parse_status_addr_variants() {
+        let explicit: SocketAddr = "127.0.0.1:19501".parse().unwrap();
+        assert_eq!(
+            parse_status_addr(Some("127.0.0.1:19501".into()), 5),
+            vec![explicit]
+        );
+        assert_eq!(
+            parse_status_addr(Some("19501".into()), 5),
+            vec![SocketAddr::from(([127, 0, 0, 1], 19501))]
+        );
+        assert_eq!(
+            parse_status_addr(None, 7),
+            vec![SocketAddr::from(([127, 0, 0, 1], 9007))]
+        );
+        assert_eq!(
+            parse_status_addr(Some("not an address".into()), 5),
+            vec![SocketAddr::from(([127, 0, 0, 1], 9005))]
+        );
+    }
+
+    /// End-to-end NDJSON round trip over TCP loopback (Windows): the
+    /// production TCP handler answers a raw client request.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn status_tcp_round_trip() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let state = test_state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+
+        let client = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("connect");
+            stream
+                .write_all(b"{\"cmd\":\"snapshot\"}\n")
+                .await
+                .expect("write request");
+            stream.shutdown().await.expect("half-close");
+            let mut buf = String::new();
+            stream.read_to_string(&mut buf).await.expect("read reply");
+            buf
+        });
+
+        let (conn, _) = listener.accept().await.expect("accept");
+        handle_tcp_conn(conn, state).await;
+
+        let response = client.await.expect("client task");
+        let parsed: lanlink_proto::status::StatusResponse =
+            serde_json::from_str(response.trim_end()).expect("parse response");
+        match parsed {
+            lanlink_proto::status::StatusResponse::Snapshot(snap) => {
+                assert_eq!(snap.status.network_id.0, 5);
+                assert_eq!(snap.peers.len(), 3);
+                assert_eq!(snap.peers[0].path, PathKind::Direct);
+            }
+            lanlink_proto::status::StatusResponse::Error { error } => {
+                panic!("unexpected error response: {error}")
+            }
+        }
     }
 
     /// A malformed request line must answer with an error envelope, not kill

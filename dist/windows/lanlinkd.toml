@@ -1,7 +1,7 @@
 # LanLink daemon configuration (Windows service).
 #
 # This file is read by the LanLinkDaemon service from:
-#   C:\ProgramData\LanLink\lanlinkd.toml
+#   C:\Program Files\LanLink\lanlinkd.toml
 #
 # The installer writes it only once: editing it here is safe, upgrades and
 # repairs will NOT overwrite your changes. After editing, restart the
@@ -19,7 +19,7 @@ network_id = 1
 
 # Either `password` or `password_file` is required.
 #password = "change-me"
-password_file = '''C:\ProgramData\LanLink\network.secret'''
+password_file = '''C:\Program Files\LanLink\network.secret'''
 
 # UDP socket to listen on; also advertised to peers as a direct candidate.
 bind = "0.0.0.0:9000"
@@ -29,6 +29,12 @@ tap = "lanlink0"
 
 # Virtual NIC MTU. 1400 leaves headroom for encryption + outer UDP/IP.
 mtu = 1400
+
+[status]
+# Read-only status endpoint for the desktop/TUI/Web frontends. On Windows
+# this is a TCP loopback address; the desktop app discovers it automatically.
+# Keep the port aligned with `network_id` above: default is 9000 + network_id.
+socket = "127.0.0.1:9001"
 
 # STUN servers used for NAT discovery. Empty = built-in defaults.
 stun_servers = []

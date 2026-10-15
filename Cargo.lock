@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "coordinator"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1255,7 +1255,7 @@ dependencies = [
  "rustc_version",
  "toml 1.1.8+spec-1.1.0",
  "vswhom",
- "winreg 0.56.0",
+ "winreg",
 ]
 
 [[package]]
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-crypto"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "aead",
  "anyhow",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-desktop"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2515,13 +2515,14 @@ dependencies = [
  "tauri-build",
  "thiserror 1.0.69",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "lanlink-firewall"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "thiserror 1.0.69",
  "tokio",
@@ -2530,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-gateway"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "lanlink-proto",
  "thiserror 1.0.69",
@@ -2540,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-gui"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2551,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-proto"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2559,7 +2560,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-punch"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "if-addrs",
@@ -2577,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-relay"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2592,7 +2593,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-switch"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "lanlink-crypto",
  "lanlink-proto",
@@ -2603,7 +2604,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-tap"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2611,16 +2612,16 @@ dependencies = [
  "lanlink-proto",
  "netlink-packet-route 0.21.0",
  "rtnetlink",
- "tap-windows",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tun",
+ "wintun-bindings",
 ]
 
 [[package]]
 name = "lanlink-tui"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2632,11 +2633,12 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
 name = "lanlink-web"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2647,6 +2649,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "toml 0.8.23",
  "tower",
  "tower-http",
  "tracing",
@@ -2655,7 +2658,7 @@ dependencies = [
 
 [[package]]
 name = "lanlinkctl"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2671,7 +2674,7 @@ dependencies = [
 
 [[package]]
 name = "lanlinkd"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2695,6 +2698,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows-service",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5155,17 +5159,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tap-windows"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0dc8a7f6d151859deeadf39a722f1fabae2f40cfce1c6b678f121bbd194dcbcb"
-dependencies = [
- "scopeguard",
- "winapi",
- "winreg 0.7.0",
-]
-
-[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5769,6 +5762,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5778,12 +5781,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]
@@ -6726,15 +6732,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "winreg"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0120db82e8a1e0b9fb3345a539c478767c0048d842860994d96113d5b667bd69"
-dependencies = [
- "winapi",
 ]
 
 [[package]]

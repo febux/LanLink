@@ -251,9 +251,21 @@ enum Cmd {
 async fn main() {
     let args = Args::parse();
 
+    // The Windows service entry point installs its own file-based subscriber;
+    // the `service run` command is invoked without this `main`. For every
+    // other invocation (CLI, cargo run, ...) keep the default fmt subscriber.
+    #[cfg(not(target_os = "windows"))]
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    #[cfg(target_os = "windows")]
+    {
+        if !matches!(args.cmd, Cmd::Service(service::ServiceCmd::Run)) {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .init();
+        }
+    }
 
     let result = match args.cmd {
         Cmd::StaticPeer {
@@ -405,7 +417,7 @@ async fn run_static_peer(
     switch.add_peer(peer, peer_addr);
     let switch = Arc::new(Mutex::new(switch));
 
-    let socket = Arc::new(tokio::net::UdpSocket::bind(bind).await?);
+    let socket = Arc::new(bind_udp_socket(bind).await?);
     tracing::info!(
         tap = %tap_name,
         %local_ip,
@@ -556,7 +568,7 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
     let metrics = Arc::new(Metrics::default());
     let start_time = Instant::now();
 
-    let socket = Arc::new(tokio::net::UdpSocket::bind(bind).await?);
+    let socket = Arc::new(bind_udp_socket(bind).await?);
 
     // Bind to a network relay server (M4/M5 fallback). The relay is content-blind:
     // it only learns our public UDP endpoint and node id, then forwards encrypted
@@ -1167,6 +1179,12 @@ async fn start_coordinated_pump(
         loop {
             let (n, from) = match socket_rx.recv_from(&mut buf).await {
                 Ok(r) => r,
+                Err(e) if is_udp_icmp_reset(&e) => {
+                    // Windows turns ICMP "port unreachable" into WSAECONNRESET
+                    // on UDP sockets. Log quietly and keep receiving.
+                    tracing::debug!(error = %e, "UDP recv reset by ICMP; continuing");
+                    continue;
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "UDP recv failed");
                     continue;
@@ -1417,6 +1435,10 @@ async fn start_packet_pump(
         loop {
             let (n, from) = match socket_rx.recv_from(&mut buf).await {
                 Ok(r) => r,
+                Err(e) if is_udp_icmp_reset(&e) => {
+                    tracing::debug!(error = %e, "UDP recv reset by ICMP; continuing");
+                    continue;
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "UDP recv failed");
                     continue;
@@ -1559,7 +1581,114 @@ fn prefix_to_netmask(prefix: u8) -> anyhow::Result<std::net::Ipv4Addr> {
     } else {
         (!0u32) << (32 - prefix)
     };
-    Ok(std::net::Ipv4Addr::from(bits.to_be()))
+    // `Ipv4Addr::from(u32)` interprets the value as big-endian (network order)
+    // directly. Do NOT call `.to_be()` — on little-endian that swaps the bytes
+    // and produces an invalid netmask such as 0.255.255.255 for /24.
+    Ok(std::net::Ipv4Addr::from(bits))
+}
+
+/// Bind a UDP socket and disable ICMP "port unreachable" / "network
+/// unreachable" errors on Windows. Without this, a UDP send to a closed port
+/// causes later `recv_from` to fail with WSAECONNRESET (10054), even though
+/// UDP is connectionless.
+async fn bind_udp_socket(bind: SocketAddr) -> anyhow::Result<tokio::net::UdpSocket> {
+    let std_socket = std::net::UdpSocket::bind(bind)?;
+
+    #[cfg(windows)]
+    disable_udp_icmp_errors(&std_socket);
+
+    Ok(tokio::net::UdpSocket::from_std(std_socket)?)
+}
+
+/// True when a UDP recv/send error is just Windows reporting an ICMP
+/// "port/network unreachable" back to the socket (WSAECONNRESET, os error 10054).
+/// These are expected when a peer endpoint goes away and should not be treated
+/// as fatal.
+fn is_udp_icmp_reset(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::ConnectionReset || e.raw_os_error() == Some(10054)
+}
+
+#[test]
+fn is_udp_icmp_reset_detects_winsock_connreset() {
+    let e = std::io::Error::from_raw_os_error(10054);
+    assert!(is_udp_icmp_reset(&e), "raw os error 10054 should be classified as ICMP reset");
+}
+
+#[test]
+fn is_udp_icmp_reset_detects_connection_reset_kind() {
+    let e = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "icmp reset");
+    assert!(is_udp_icmp_reset(&e), "ConnectionReset kind should be classified as ICMP reset");
+}
+
+#[test]
+fn is_udp_icmp_reset_ignores_other_errors() {
+    let e = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+    assert!(!is_udp_icmp_reset(&e), "unrelated errors should not be classified as ICMP reset");
+}
+
+#[cfg(windows)]
+fn disable_udp_icmp_errors(socket: &std::net::UdpSocket) {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{WSAIoctl, IOC_IN, IOC_VENDOR, SOCKET_ERROR};
+
+    const SIO_UDP_CONNRESET: u32 = IOC_IN | IOC_VENDOR | 12;
+    const SIO_UDP_NETRESET: u32 = IOC_IN | IOC_VENDOR | 15;
+
+    fn set_ioctl(sock: usize, code: u32, name: &str) {
+        let mut disabled: u32 = 0;
+        let mut bytes_returned: u32 = 0;
+        let ret = unsafe {
+            WSAIoctl(
+                sock,
+                code,
+                &mut disabled as *mut _ as *mut _,
+                std::mem::size_of::<u32>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut bytes_returned,
+                std::ptr::null_mut(),
+                None,
+            )
+        };
+        if ret == SOCKET_ERROR {
+            tracing::warn!("failed to disable {name} on UDP socket; continuing anyway");
+        } else {
+            tracing::debug!("disabled {name} on UDP socket");
+        }
+    }
+
+    let sock = socket.as_raw_socket() as usize;
+    set_ioctl(sock, SIO_UDP_CONNRESET, "SIO_UDP_CONNRESET");
+    set_ioctl(sock, SIO_UDP_NETRESET, "SIO_UDP_NETRESET");
+}
+
+#[test]
+fn prefix_to_netmask_common_prefixes() {
+    assert_eq!(
+        prefix_to_netmask(24).unwrap(),
+        std::net::Ipv4Addr::new(255, 255, 255, 0)
+    );
+    assert_eq!(
+        prefix_to_netmask(8).unwrap(),
+        std::net::Ipv4Addr::new(255, 0, 0, 0)
+    );
+    assert_eq!(
+        prefix_to_netmask(16).unwrap(),
+        std::net::Ipv4Addr::new(255, 255, 0, 0)
+    );
+    assert_eq!(
+        prefix_to_netmask(30).unwrap(),
+        std::net::Ipv4Addr::new(255, 255, 255, 252)
+    );
+    assert_eq!(
+        prefix_to_netmask(0).unwrap(),
+        std::net::Ipv4Addr::new(0, 0, 0, 0)
+    );
+    assert_eq!(
+        prefix_to_netmask(32).unwrap(),
+        std::net::Ipv4Addr::new(255, 255, 255, 255)
+    );
+    assert!(prefix_to_netmask(33).is_err());
 }
 
 fn node_id_from_u64(v: u64) -> lanlink_proto::NodeId {

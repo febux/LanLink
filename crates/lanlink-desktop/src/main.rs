@@ -56,6 +56,24 @@ fn main() {
             commands::create_network,
             commands::join_network,
             commands::open_browser,
+            commands::coordinator_status,
+            commands::coordinator_start,
+            commands::coordinator_stop,
+            commands::daemon_config_exists,
+            #[cfg(windows)]
+            commands::daemon_log_tail,
+            #[cfg(windows)]
+            commands::service_install,
+            #[cfg(windows)]
+            commands::service_uninstall,
+            #[cfg(windows)]
+            commands::service_start,
+            #[cfg(windows)]
+            commands::service_stop,
+            #[cfg(windows)]
+            commands::service_status,
+            #[cfg(windows)]
+            commands::service_up,
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {

@@ -173,8 +173,8 @@ sudo lanlinkd service enable gaming-night
 lanlinkd service up --name gaming-night --password "s3cret"
 
 # Or manage the config manually
-copy "C:\ProgramData\LanLink\lanlinkd.example.toml" "C:\ProgramData\LanLink\lanlinkd.toml"
-notepad "C:\ProgramData\LanLink\lanlinkd.toml"
+copy "C:\Program Files\LanLink\lanlinkd.example.toml" "C:\Program Files\LanLink\lanlinkd.toml"
+notepad "C:\Program Files\LanLink\lanlinkd.toml"
 sc start LanLinkDaemon
 ```
 
@@ -225,5 +225,5 @@ lanlink-gui --dev --mode desktop
 - Permission denied on TAP device → the unit needs `CAP_NET_ADMIN` and
   `CAP_NET_RAW`; the packaged `lanlinkd@.service` already sets these.
 - Windows: the Wintun driver is bundled as `wintun.dll`; the virtual adapter
-  appears the first time the daemon creates it after the Wintun backend is
-  wired up.
+  appears the first time the daemon creates it. Wintun is a layer-3 interface,
+  so the Windows data plane carries IP traffic only.

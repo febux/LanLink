@@ -29,9 +29,9 @@ Key design points:
 - **End-to-end encryption**: the coordinator only helps with membership; it cannot
   decrypt traffic.
 - **Cross-platform foundation**: Linux TAP is production-ready; Windows uses the
-  OpenVPN TAP-Windows6 driver (new, needs testing); macOS utun is stubbed.
-  See the `windows-parity` change under `openspec/changes/` for the Windows
-  testing checklist and remaining protocol work.
+  bundled Wintun driver (no separate install required, layer-3 IP only); macOS
+  utun is stubbed. See the `windows-parity` change under `openspec/changes/`
+  for the Windows testing checklist and remaining protocol work.
 
 ## Project status
 
@@ -52,9 +52,9 @@ Implemented so far:
 
 **Not yet ready**:
 
-- **Windows TAP-Windows6 backend** — implemented using the `tap-windows` crate.
-  Requires the OpenVPN TAP-Windows6 driver to be installed on the Windows machine.
-  This is new and needs real-machine testing.
+- **Windows Wintun backend** — implemented using `wintun-bindings` with the
+  bundled `wintun.dll`. No separate driver install is required; carries layer-3
+  IP packets only on Windows. This is new and needs real-machine testing.
 - **macOS utun backend** — stubbed.
 - **TCP/Teredo fallback** — TCP direct and relay fallback are implemented
   (see `openspec/changes/archive/2026-10-15-tcp-fallback/`); the Teredo/IPv6
@@ -109,27 +109,27 @@ For full install options see [`docs/install.md`](./docs/install.md).
 
 ### Windows — experimental
 
-LanLink on Windows uses the OpenVPN TAP-Windows6 driver for layer-2 Ethernet
-frames. Before running LanLink you must install that driver:
+LanLink on Windows uses the bundled Wintun driver (the MSI installs
+`wintun.dll` next to the binaries). No separate driver install is required.
+Note: Wintun is a layer-3 (IP packet) interface, so the Windows data plane
+currently carries IP traffic only; ARP and raw Ethernet multicast discovery
+are not available yet.
 
-1. Download the TAP-Windows6 installer from the
-   [OpenVPN community downloads](https://openvpn.net/community-downloads/) page
-   (look for "tap-windows"), or install any OpenVPN client that includes it.
-2. Build LanLink from source on a Windows machine with Rust installed:
+1. Install the MSI or build from source on a Windows machine with Rust:
    ```powershell
    cargo build --workspace --release
    ```
-3. Run the coordinator (or point to an existing one):
+2. Run the coordinator (or point to an existing one):
    ```powershell
    cargo run -p coordinator -- --db lanlink.db
    ```
-4. In another elevated PowerShell, start the daemon:
+3. In another elevated PowerShell, start the daemon:
    ```powershell
    $env:LANLINK_PASSWORD="hunter2"
    cargo run -p lanlinkd -- up --name gaming-night --coordinator http://COORD_IP:8080
    ```
-   You may need to allow the TAP adapter through the Windows firewall.
-5. Open the WebUI or TUI from a non-elevated terminal:
+   You may need to allow the Wintun adapter through the Windows firewall.
+4. Open the WebUI or TUI from a non-elevated terminal:
    ```powershell
    cargo run -p lanlink-web
    ```

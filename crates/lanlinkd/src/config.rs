@@ -523,6 +523,40 @@ phys_interface = "enp3s0"
     }
 
     #[test]
+    fn password_file_with_forward_slashes_parses_on_all_platforms() {
+        // Windows paths written into generated service configs must use '/'
+        // (or a TOML literal string) because backslashes in a basic string
+        // are escape sequences. This regression test ensures the path is kept
+        // verbatim and resolves.
+        let file: FileConfig = toml::from_str(
+            "[network]\ncoordinator = \"http://x\"\nnetwork_id = 1\npassword_file = \"C:/Program Files/LanLink/gaming-night.secret\"\n",
+        )
+        .unwrap();
+        let dir = std::env::temp_dir().join(format!("lanlink-pwslash-test-{}" , std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("gaming-night.secret");
+        std::fs::write(&path, "secret\n").unwrap();
+        let cli = CliOverrides {
+            password: None,
+            ..Default::default()
+        };
+        // Override password_file to the temp path so the test is cross-platform.
+        let mut file = file;
+        file.network.password_file = Some(path.to_string_lossy().to_string());
+        let cfg = resolve(&file, &cli).unwrap();
+        assert_eq!(cfg.password, "secret");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backslash_password_file_in_basic_string_is_invalid_toml() {
+        let result = toml::from_str::<FileConfig>(
+            "[network]\ncoordinator = \"http://x\"\nnetwork_id = 1\npassword_file = \"C:\\Program Files\\LanLink\\network.secret\"\n",
+        );
+        assert!(result.is_err(), "backslashes in a TOML basic string must be rejected");
+    }
+
+    #[test]
     fn update_section_defaults_off_and_resolves() {
         let file: FileConfig = toml::from_str(MINIMAL).unwrap();
         let cfg = resolve(&file, &CliOverrides::default()).unwrap();

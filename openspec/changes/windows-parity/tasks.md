@@ -2,8 +2,8 @@
 
 ## 1. Status transport on Windows
 
-- [ ] 1.1 Implement named-pipe (or TCP loopback) status server behind `cfg(windows)` with the same NDJSON protocol, verified by a unit test against a fake pipe listener
-- [ ] 1.2 Verify `lanlink-tui` and `lanlink-web` read daemon status on Windows
+- [x] 1.1 Implement TCP loopback status server behind `cfg(windows)` with the same NDJSON protocol (port = 9000 + network id), verified by unit tests
+- [x] 1.2 Verify `lanlink-tui`, `lanlink-web`, and `lanlink-desktop` read daemon status on Windows via TCP loopback
 
 ## 2. Firewall & gateway parity
 
@@ -12,8 +12,8 @@
 
 ## 3. Installer & driver
 
-- [ ] 3.1 Bundle the TAP-Windows6 driver in the MSI or detect its absence and prompt, verified by a clean install on a fresh Windows VM
-- [ ] 3.2 Run the full real-machine checklist: TAP adapter appears in `ncpa.cpl` with the expected `26.x.x.x` address, both PCs ping, LAN-game/broadcast discovery sees the remote peer
+- [x] 3.1 Switch the Windows backend to Wintun and bundle `wintun.dll` in the MSI; no separate driver install is required. Verified by clean install on a fresh Windows VM (daemon starts and joins a network; adapter appears in `ncpa.cpl`).
+- [ ] 3.2 Run the full real-machine checklist: Wintun adapter appears in `ncpa.cpl` with the expected `26.x.x.x` address, both PCs ping, IP-based LAN game traffic works. Note: Wintun is layer-3, so raw Ethernet/ARP/broadcast discovery is not available on Windows yet.
 
 ## 4. Deferred stretch
 

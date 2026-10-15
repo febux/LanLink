@@ -1,9 +1,12 @@
-//! Daemon status-socket client (Unix domain socket, newline-delimited JSON).
+//! Daemon status-socket client (Unix domain socket or TCP loopback,
+//! newline-delimited JSON).
 
 use lanlink_proto::status::{StatusRequest, StatusResponse, StatusSnapshot};
+#[cfg(windows)]
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-/// Fetch one snapshot over the daemon's status socket.
+/// Fetch one snapshot over the daemon's Unix status socket.
 #[cfg(unix)]
 pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -25,17 +28,34 @@ pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
     }
 }
 
-#[cfg(not(unix))]
-pub async fn fetch_snapshot(_path: &Path) -> anyhow::Result<StatusSnapshot> {
-    anyhow::bail!("the daemon status socket is not supported on this platform")
+/// Fetch one snapshot over the daemon's TCP loopback status socket (Windows).
+#[cfg(windows)]
+pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let addr: SocketAddr = path
+        .to_str()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("invalid TCP status address: {}", path.display()))?;
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    let request = serde_json::to_string(&StatusRequest::Snapshot)?;
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(b"\n").await?;
+    stream.shutdown().await?;
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let text = std::str::from_utf8(&buf)?;
+    let line = text.lines().next().unwrap_or("");
+    match serde_json::from_str::<StatusResponse>(line)? {
+        StatusResponse::Snapshot(snapshot) => Ok(snapshot),
+        StatusResponse::Error { error } => anyhow::bail!("daemon: {error}"),
+    }
 }
 
 /// Find a listening daemon socket when `--status-socket` was not given.
-/// Tries `/run/lanlink/lanlinkd-*.sock`, then `/tmp/lanlinkd-*.sock`, in
-/// lexical order; the first connectable socket wins.
-///
-/// Returns `Err` when the directory exists but cannot be read — usually
-/// because the user is not in the `lanlink` group — with a helpful hint.
+#[cfg(unix)]
 pub async fn discover_socket() -> Result<Option<PathBuf>, String> {
     const DIRS: &[&str] = &["/run/lanlink", "/tmp"];
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -67,12 +87,57 @@ pub async fn discover_socket() -> Result<Option<PathBuf>, String> {
     Ok(None)
 }
 
+/// Path of the live daemon config written by the MSI / `service up`
+/// (matches `CONFIG_PATH` in `crates/lanlinkd/src/service.rs`).
+#[cfg(windows)]
+const DAEMON_CONFIG: &str = "C:\\Program Files\\LanLink\\lanlinkd.toml";
+
+/// Read the configured `[status] socket` from the daemon config, if the
+/// config exists and parses.
+#[cfg(windows)]
+fn configured_status_socket() -> Option<String> {
+    #[derive(serde::Deserialize, Default)]
+    struct Probe {
+        #[serde(default)]
+        status: StatusSection,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct StatusSection {
+        socket: Option<String>,
+    }
+    let text = std::fs::read_to_string(DAEMON_CONFIG).ok()?;
+    let probe: Probe = toml::from_str(&text).ok()?;
+    probe.status.socket
+}
+
+/// Find a listening daemon TCP status socket on Windows.
+#[cfg(windows)]
+pub async fn discover_socket() -> Result<Option<PathBuf>, String> {
+    // The daemon config is authoritative when it names a status socket.
+    if let Some(configured) = configured_status_socket() {
+        if let Ok(addr) = configured.parse::<SocketAddr>() {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                return Ok(Some(PathBuf::from(addr.to_string())));
+            }
+        }
+    }
+    // Default layout: port = 9000 + network_id, ids 1..=32.
+    for network_id in 1u64..=32 {
+        let addr = SocketAddr::from(([127, 0, 0, 1], (9000u16 + network_id as u16)));
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            return Ok(Some(PathBuf::from(addr.to_string())));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(unix)]
 async fn probe(path: &Path) -> bool {
     tokio::net::UnixStream::connect(path).await.is_ok()
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+#[allow(dead_code)]
 async fn probe(_path: &Path) -> bool {
     false
 }

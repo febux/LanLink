@@ -276,14 +276,16 @@ async fn up(
     )
     .await?;
 
-    std::fs::create_dir_all(platform::CONFIG_DIR)?;
+    std::fs::create_dir_all(platform::CONFIG_DIR)
+        .map_err(|e| anyhow::anyhow!("failed to create directory {}: {e}", platform::CONFIG_DIR))?;
     let config_path = format!("{}/{}.toml", platform::CONFIG_DIR, name);
     let secret_path = format!("{}/{}.secret", platform::CONFIG_DIR, name);
 
     // Write the password file root-owned 0600. Best effort: if we are not
     // root the file is owned by the invoking user; systemd can still read it
     // if the unit user matches.
-    std::fs::write(&secret_path, password.as_bytes())?;
+    std::fs::write(&secret_path, password.as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to write secret file {}: {e}", secret_path))?;
     let _ = std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o600));
 
     // Write a minimal config that references the secret file.
@@ -299,7 +301,8 @@ async fn up(
     }
     config_text.push_str(&format!("tap = \"{}\"\n", cfg.tap));
     config_text.push_str(&format!("mtu = {}\n", cfg.mtu));
-    std::fs::write(&config_path, config_text)?;
+    std::fs::write(&config_path, config_text)
+        .map_err(|e| anyhow::anyhow!("failed to write config file {}: {e}", config_path))?;
 
     // Ensure the service user can read both files when invoked as root.
     #[cfg(target_os = "linux")]
@@ -377,26 +380,55 @@ async fn up(
     )
     .await?;
 
-    let config_dir = r"C:\ProgramData\LanLink";
+    let config_dir = r"C:\Program Files\LanLink";
     let config_path = format!("{}\\lanlinkd.toml", config_dir);
     let secret_path = format!("{}\\{}.secret", config_dir, name);
 
-    std::fs::create_dir_all(config_dir)?;
-    std::fs::write(&secret_path, password.as_bytes())?;
+    std::fs::create_dir_all(config_dir)
+        .map_err(|e| anyhow::anyhow!("failed to create directory {}: {e}", config_dir))?;
 
+    // Defensive cleanup: earlier versions of the elevation batch mistakenly
+    // created a directory named `lanlinkd.toml` instead of the directory.
+    // If that leftover exists it blocks the real config file write.
+    let config_path_obj = std::path::Path::new(&config_path);
+    if config_path_obj.is_dir() {
+        tracing::warn!(path = %config_path, "removing leftover directory that blocks config file write");
+        std::fs::remove_dir_all(&config_path)
+            .map_err(|e| anyhow::anyhow!("failed to remove leftover directory {}: {e}", config_path))?;
+    }
+
+    std::fs::write(&secret_path, password.as_bytes())
+        .map_err(|e| anyhow::anyhow!("failed to write secret file {}: {e}", secret_path))?;
+
+    let status_socket = format!("127.0.0.1:{}", 9000 + cfg.network_id);
+
+    // Write the secret path with forward slashes so the generated TOML is
+    // valid on Windows (backslashes would be parsed as escape sequences in
+    // a basic string). Windows file APIs accept '/' as a separator.
+    let secret_path_toml = secret_path.replace('\\', "/");
     let mut config_text = format!(
         "[network]\n\
          coordinator = \"{}\"\n\
          network_id = {}\n\
          password_file = \"{}\"\n",
-        coordinator, cfg.network_id, secret_path
+        coordinator, cfg.network_id, secret_path_toml
     );
     if let Some(b) = cfg.bind.port().checked_sub(0).map(|_| cfg.bind) {
         config_text.push_str(&format!("bind = \"{}\"\n", b));
     }
     config_text.push_str(&format!("tap = \"{}\"\n", cfg.tap));
     config_text.push_str(&format!("mtu = {}\n", cfg.mtu));
-    std::fs::write(&config_path, config_text)?;
+    config_text.push_str("\n[status]\n");
+    config_text.push_str(&format!("socket = \"{}\"\n", status_socket));
+    std::fs::write(&config_path, config_text)
+        .map_err(|e| anyhow::anyhow!("failed to write config file {}: {e}", config_path))?;
+
+    // Sanity-check that the generated TOML parses and yields the password.
+    let parsed = crate::config::load(&config_path, &crate::config::CliOverrides::default())
+        .map_err(|e| anyhow::anyhow!("generated config is invalid: {e}"))?;
+    if parsed.password != password {
+        anyhow::bail!("generated config resolved to a different password (secret file mismatch?)");
+    }
 
     tracing::info!(
         config = %config_path,
@@ -453,13 +485,55 @@ mod windows_impl {
         ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
         ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
     };
+    use tracing_subscriber::prelude::*;
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
     use windows_service::{service_dispatcher, Error as WinSvcError};
 
     pub const SERVICE_NAME: &str = "LanLinkDaemon";
     pub const SERVICE_DISPLAY: &str = "LanLink Virtual LAN Daemon";
-    pub const CONFIG_PATH: &str = "C:\\ProgramData\\LanLink\\lanlinkd.toml";
+    pub const CONFIG_PATH: &str = "C:\\Program Files\\LanLink\\lanlinkd.toml";
+
+    /// Path to a persistent log file so daemon startup failures inside the
+    /// Windows service are visible (stdout/stderr are not captured by SCM).
+    pub const LOG_PATH: &str = "C:\\Program Files\\LanLink\\lanlinkd.log";
+
+    fn log_writer() -> std::fs::File {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(LOG_PATH)
+            .unwrap_or_else(|_| {
+                // If the log file cannot be opened, write to a temp file so we
+                // still capture something useful.
+                let temp = std::env::temp_dir().join("lanlinkd-service.log");
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(temp)
+                    .unwrap_or_else(|_| {
+                        // Last resort: open the null device so we have a valid File.
+                        #[cfg(windows)]
+                        {
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .open(r"\\.\NUL")
+                                .unwrap_or_else(|_| {
+                                    // Truly cannot open anything; panic so the
+                                    // failure is visible in the SCM event log.
+                                    panic!("cannot open log file or NUL")
+                                })
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .open("/dev/null")
+                                .unwrap_or_else(|_| panic!("cannot open log file or /dev/null"))
+                        }
+                    })
+            })
+    }
 
     define_windows_service!(ffi_service_main, service_main);
 
@@ -468,6 +542,19 @@ mod windows_impl {
     }
 
     pub fn service_main(_arguments: Vec<OsString>) {
+        // Send all tracing to a persistent file. stdout/stderr inside the
+        // SCM are discarded, so without this we cannot diagnose startup
+        // failures reported only as "exit code 1".
+        let _ = std::fs::create_dir_all(r"C:\Program Files\LanLink");
+        let file_appender = tracing_subscriber::fmt::layer()
+            .with_writer(log_writer)
+            .with_ansi(false);
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::from_default_env())
+            .with(file_appender);
+        let _ = tracing::subscriber::set_global_default(subscriber)
+            .map_err(|e| eprintln!("failed to set tracing subscriber: {e}"));
+
         if let Err(e) = run_service() {
             tracing::error!(error = %e, "lanlinkd Windows service failed");
         }
@@ -475,11 +562,12 @@ mod windows_impl {
 
     fn run_service() -> Result<(), WinSvcError> {
         let (tx, rx) = mpsc::channel::<()>();
+        let stop_tx = tx.clone();
 
         let event_handler = move |control_event: ServiceControl| -> ServiceControlHandlerResult {
             match control_event {
                 ServiceControl::Stop | ServiceControl::Shutdown | ServiceControl::Preshutdown => {
-                    let _ = tx.send(());
+                    let _ = stop_tx.send(());
                     ServiceControlHandlerResult::NoError
                 }
                 ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -504,30 +592,58 @@ mod windows_impl {
         set_status(ServiceState::StartPending, ServiceControlAccept::empty())?;
 
         // Run the daemon on a dedicated thread with its own tokio runtime.
-        let runner = std::thread::spawn(|| {
+        // If the daemon fails (bad config, missing secret, bind error, ...),
+        // the thread unblocks the control loop below so the service
+        // transitions to Stopped with a failure exit code instead of
+        // reporting a zombie Running state forever.
+        let runner = std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-            rt.block_on(async move {
+            let ok = rt.block_on(async move {
                 if let Err(e) = crate::run_from_config_path(CONFIG_PATH).await {
                     tracing::error!(error = %e, "lanlinkd service failed");
+                    // Also print to the persistent log file; tracing_subscriber
+                    // may not have flushed before the service exits.
+                    eprintln!("lanlinkd service failed: {e}");
                     false
                 } else {
                     true
                 }
-            })
+            });
+            // Give the file subscriber a moment to flush before the thread
+            // exits and the runtime is dropped.
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if !ok {
+                let _ = tx.send(());
+            }
+            ok
         });
 
         set_status(ServiceState::Running, ServiceControlAccept::STOP)?;
 
-        // Block until SCM asks us to stop, then trigger the daemon shutdown.
+        // Block until the SCM asks us to stop OR the daemon fails, then
+        // trigger the daemon shutdown.
         let _ = rx.recv();
         crate::shutdown().trigger();
         let ok = runner.join().unwrap_or(false);
 
         set_status(ServiceState::StopPending, ServiceControlAccept::empty())?;
-        set_status(ServiceState::Stopped, ServiceControlAccept::empty())?;
 
-        // Propagate a non-zero exit code if the daemon failed so the SCM logs it.
-        let _ = ok;
+        // Propagate the daemon's outcome so the SCM (and `service status`)
+        // can distinguish a clean stop from a failure.
+        status_handle.set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: if ok {
+                ServiceExitCode::Win32(0)
+            } else {
+                ServiceExitCode::Win32(1)
+            },
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })?;
+
         Ok(())
     }
 
@@ -633,7 +749,27 @@ async fn status() -> anyhow::Result<()> {
     let st = service
         .query_status()
         .map_err(|e| anyhow::anyhow!("failed to query status: {e}"))?;
-    println!("{}: {:?}", windows_impl::SERVICE_NAME, st.current_state);
+    if st.current_state == windows_service::service::ServiceState::Stopped {
+        // A stopped service with a non-zero exit code means the daemon
+        // started and failed — surface that instead of a bare "Stopped".
+        match st.exit_code {
+            windows_service::service::ServiceExitCode::Win32(0) => {
+                println!("{}: Stopped", windows_impl::SERVICE_NAME)
+            }
+            windows_service::service::ServiceExitCode::Win32(code) => println!(
+                "{}: Stopped (unexpected exit code {code}: the daemon failed; check {} and the network secret file)",
+                windows_impl::SERVICE_NAME,
+                windows_impl::CONFIG_PATH
+            ),
+            windows_service::service::ServiceExitCode::ServiceSpecific(code) => println!(
+                "{}: Stopped (service-specific error {code}: the daemon failed; check {} and the network secret file)",
+                windows_impl::SERVICE_NAME,
+                windows_impl::CONFIG_PATH
+            ),
+        }
+    } else {
+        println!("{}: {:?}", windows_impl::SERVICE_NAME, st.current_state);
+    }
     Ok(())
 }
 

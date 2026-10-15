@@ -4,7 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LanLink</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=3">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
 </head>
 <body>
   <header>
@@ -30,7 +33,29 @@
       <div id="dashboard-empty" class="empty-state">
         <p>No daemon status available.</p>
         <p id="dashboard-error" class="error-detail"></p>
-        <p class="hint">Start <code>lanlinkd</code>, or run the full dev stack with <code>cargo run -p lanlink-gui -- --dev --mode desktop</code>.</p>
+        <div id="windows-service-panel" class="hidden">
+          <p id="service-state-line" class="hint">Checking service state&hellip;</p>
+          <div class="coord-row">
+            <span id="coord-state" class="coord-state">Checking coordinator&hellip;</span>
+            <button id="coord-start" type="button">Run built-in coordinator</button>
+            <button id="coord-stop" type="button">Stop</button>
+          </div>
+          <form id="service-up-form" class="form">
+            <label>Network name <input type="text" id="up-name" required autocomplete="off"></label>
+            <label>Password <input type="password" id="up-password" required></label>
+            <label>Coordinator <input type="url" id="up-coordinator" value="http://localhost:8080"></label>
+            <label class="inline"><input type="checkbox" id="up-public"> Public / gaming firewall</label>
+            <button type="submit">Start network</button>
+          </form>
+          <div id="service-up-result" class="result"></div>
+          <div class="service-actions">
+            <button id="svc-install">Install service</button>
+            <button id="svc-start">Start service</button>
+            <button id="svc-stop">Stop service</button>
+            <button id="svc-status">Service status</button>
+          </div>
+          <pre id="service-log"></pre>
+        </div>
       </div>
       <div id="dashboard-content" class="grid hidden">
         <div class="card">
@@ -143,6 +168,6 @@
   </main>
 
   <div id="toast" class="toast"></div>
-  <script src="app.js"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>
