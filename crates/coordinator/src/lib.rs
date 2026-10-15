@@ -4,10 +4,15 @@ pub mod db;
 use std::sync::Arc;
 
 /// Build the coordinator axum application around an existing SQLite pool.
-pub fn app(pool: sqlx::SqlitePool, relay_servers: Vec<std::net::SocketAddr>) -> axum::Router {
+pub fn app(
+    pool: sqlx::SqlitePool,
+    relay_servers: Vec<std::net::SocketAddr>,
+    tcp_relay_servers: Vec<std::net::SocketAddr>,
+) -> axum::Router {
     let state = Arc::new(api::AppState {
         pool,
         relay_servers,
+        tcp_relay_servers,
     });
 
     axum::Router::new()

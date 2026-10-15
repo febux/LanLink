@@ -33,6 +33,10 @@ use tokio::sync::Mutex;
 
 pub use codec::{decode_control, encode_bind, encode_keepalive, ControlKind, ControlMsg};
 
+pub mod tcp;
+
+pub use tcp::{client as tcp_client, TcpRelayServer};
+
 /// How long a binding remains valid without a keepalive.
 const BINDING_LIFETIME: Duration = Duration::from_secs(90);
 /// How often to purge stale bindings.

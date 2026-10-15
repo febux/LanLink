@@ -25,8 +25,12 @@ pub enum StatusRequest {
 pub enum PathKind {
     /// Verified direct UDP path (hole punch succeeded or direct candidate).
     Direct,
-    /// Traffic flows through a relay server (still E2E-encrypted).
+    /// Traffic flows through a UDP relay server (still E2E-encrypted).
     Relay,
+    /// Verified direct TCP path.
+    TcpDirect,
+    /// Traffic flows through a TCP relay server.
+    TcpRelay,
     /// Hole punching is in progress.
     Punching,
     /// No usable address yet.
@@ -38,6 +42,8 @@ impl std::fmt::Display for PathKind {
         match self {
             PathKind::Direct => write!(f, "direct"),
             PathKind::Relay => write!(f, "relay"),
+            PathKind::TcpDirect => write!(f, "tcp_direct"),
+            PathKind::TcpRelay => write!(f, "tcp_relay"),
             PathKind::Punching => write!(f, "punching"),
             PathKind::Waiting => write!(f, "waiting"),
         }

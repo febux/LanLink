@@ -19,3 +19,6 @@ lanlink-proto = { path = "../lanlink-proto" }
 tun.workspace = true
 rtnetlink.workspace = true
 netlink-packet-route.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tap-windows = "0.1.2"

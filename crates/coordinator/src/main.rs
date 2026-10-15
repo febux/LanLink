@@ -15,6 +15,10 @@ struct Args {
     /// the relay's local bind address.
     #[arg(long, value_delimiter = ',')]
     relay_server: Vec<SocketAddr>,
+    /// TCP relay server address(es) advertised to joining members for fallback
+    /// traffic when UDP is blocked.
+    #[arg(long, value_delimiter = ',')]
+    tcp_relay_server: Vec<SocketAddr>,
 }
 
 #[tokio::main]
@@ -32,13 +36,20 @@ async fn main() {
     } else {
         args.relay_server
     };
+    let tcp_relay_servers = if args.tcp_relay_server.is_empty() {
+        vec!["127.0.0.1:3479"
+            .parse()
+            .expect("default TCP relay address valid")]
+    } else {
+        args.tcp_relay_server
+    };
 
     let pool = coordinator::db::connect(&args.db)
         .await
         .expect("failed to open database");
-    let app = coordinator::app(pool, relay_servers.clone());
+    let app = coordinator::app(pool, relay_servers.clone(), tcp_relay_servers.clone());
 
     let listener = tokio::net::TcpListener::bind(args.listen).await.unwrap();
-    tracing::info!(%args.listen, ?relay_servers, "coordinator listening");
+    tracing::info!(%args.listen, ?relay_servers, ?tcp_relay_servers, "coordinator listening");
     axum::serve(listener, app).await.unwrap();
 }

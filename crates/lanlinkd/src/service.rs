@@ -165,10 +165,7 @@ async fn install() -> anyhow::Result<()> {
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"));
     let bin_path = bin_dir.join("lanlinkd");
-    let rewritten = platform::UNIT.replace(
-        "/usr/bin/lanlinkd",
-        &bin_path.to_string_lossy(),
-    );
+    let rewritten = platform::UNIT.replace("/usr/bin/lanlinkd", &bin_path.to_string_lossy());
     if unit_text != rewritten {
         tokio::fs::write(platform::UNIT_PATH, rewritten).await?;
     }
@@ -318,10 +315,8 @@ async fn up(
                     .unwrap_or(0),
             )),
         );
-        let _ = std::fs::set_permissions(
-            platform::CONFIG_DIR,
-            std::fs::Permissions::from_mode(0o750),
-        );
+        let _ =
+            std::fs::set_permissions(platform::CONFIG_DIR, std::fs::Permissions::from_mode(0o750));
         for path in [&secret_path, &config_path] {
             let _ = nix::unistd::chown(
                 (*path).as_str(),
@@ -335,14 +330,8 @@ async fn up(
                 )),
             );
         }
-        let _ = std::fs::set_permissions(
-            &config_path,
-            std::fs::Permissions::from_mode(0o640),
-        );
-        let _ = std::fs::set_permissions(
-            &secret_path,
-            std::fs::Permissions::from_mode(0o640),
-        );
+        let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640));
+        let _ = std::fs::set_permissions(&secret_path, std::fs::Permissions::from_mode(0o640));
     }
 
     tracing::info!(

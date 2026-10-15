@@ -4,11 +4,15 @@
 //! Backends:
 //!
 //! - Linux: kernel TAP device (`/dev/net/tun` in TAP mode) via the `tun` crate.
-//! - Windows: Wintun ring-based adapter (WireGuard project driver) — stub for now.
+//! - Windows: OpenVPN TAP-Windows6 driver via the `tap-windows` crate. The
+//!   driver must already be installed on the system.
 //! - macOS: utun raw Ethernet interface — stub for now.
 
 use std::io;
+#[cfg(target_os = "windows")]
+use std::io::{Read, Write};
 use thiserror::Error;
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Debug, Error)]
@@ -62,7 +66,7 @@ pub fn create_nic(config: NicConfig) -> Result<Box<dyn VirtualNic>, NicError> {
     }
     #[cfg(target_os = "windows")]
     {
-        WindowsWintun::create(config).map(|d| Box::new(d) as Box<dyn VirtualNic>)
+        WindowsTap::create(config).map(|d| Box::new(d) as Box<dyn VirtualNic>)
     }
     #[cfg(target_os = "macos")]
     {
@@ -190,32 +194,183 @@ impl VirtualNic for LinuxTun {
 }
 
 // ---------------------------------------------------------------------------
-// Windows Wintun backend (stub)
+// Windows TAP-Windows6 backend
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-pub struct WindowsWintun {
+pub struct WindowsTap {
     name: String,
+    send_tx: std::sync::mpsc::Sender<Vec<u8>>,
+    recv_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
 }
 
 #[cfg(target_os = "windows")]
-impl WindowsWintun {
+impl WindowsTap {
     pub fn create(config: NicConfig) -> Result<Self, NicError> {
-        Err(NicError::Platform(
-            "Wintun backend not yet implemented".to_string(),
-        ))
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<String, String>>();
+        let (send_tx, send_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (recv_tx, recv_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+
+        let requested_name = config.name.clone();
+        let mtu = config.mtu;
+        let ipv4 = config.ipv4;
+        let netmask = config.netmask;
+
+        std::thread::spawn(move || {
+            let result: Result<tap_windows::Device, NicError> = (|| {
+                // Try to open an existing adapter with the requested name,
+                // otherwise create a new one and rename it.
+                let dev = match tap_windows::Device::open(&requested_name) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        let d = tap_windows::Device::create().map_err(|e| {
+                            NicError::Create(io::Error::other(format!("create TAP device: {e}")))
+                        })?;
+                        if let Err(e) = d.set_name(&requested_name) {
+                            tracing::warn!(
+                                error = %e,
+                                "failed to rename TAP device to requested name"
+                            );
+                        }
+                        d
+                    }
+                };
+
+                let active_name = dev.get_name().unwrap_or_else(|_| requested_name.clone());
+
+                dev.set_ip(ipv4, netmask).map_err(|e| {
+                    NicError::Create(io::Error::other(format!(
+                        "set TAP IP on '{active_name}': {e}"
+                    )))
+                })?;
+
+                if let Err(e) = set_windows_mtu(&active_name, mtu) {
+                    tracing::warn!(error = %e, "failed to set TAP MTU via netsh");
+                }
+
+                dev.up().map_err(|e| {
+                    NicError::Create(io::Error::other(format!(
+                        "bring up TAP '{active_name}': {e}"
+                    )))
+                })?;
+
+                Ok(dev)
+            })();
+
+            let active_name = match &result {
+                Ok(dev) => dev.get_name().unwrap_or_else(|_| requested_name.clone()),
+                Err(_) => requested_name.clone(),
+            };
+
+            let _ = ready_tx.send(
+                result
+                    .as_ref()
+                    .map(|_| active_name.clone())
+                    .map_err(|e| e.to_string()),
+            );
+
+            let Ok(mut dev) = result else { return };
+
+            let mut buf = vec![0u8; mtu + 128];
+            loop {
+                // Drain outgoing frames with a short timeout so we do not
+                // block indefinitely when only sending.
+                match send_rx.recv_timeout(std::time::Duration::from_millis(10)) {
+                    Ok(frame) => {
+                        if let Err(e) = dev.write_all(&frame) {
+                            tracing::debug!(error = %e, "TAP write failed");
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+
+                match dev.read(&mut buf) {
+                    Ok(0) => {
+                        tracing::warn!("TAP returned 0 bytes");
+                        continue;
+                    }
+                    Ok(n) => {
+                        if recv_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "TAP read failed");
+                        break;
+                    }
+                }
+            }
+        });
+
+        let name = ready_rx
+            .recv()
+            .map_err(|e| {
+                NicError::Create(io::Error::other(format!(
+                    "TAP setup thread did not report readiness: {e}"
+                )))
+            })?
+            .map_err(|e| NicError::Platform(e))?;
+
+        tracing::info!(
+            name = %name,
+            ip = %config.ipv4,
+            mtu = config.mtu,
+            "created Windows TAP device"
+        );
+
+        Ok(Self {
+            name,
+            send_tx,
+            recv_rx,
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_mtu(name: &str, mtu: usize) -> io::Result<()> {
+    let output = std::process::Command::new("netsh")
+        .args([
+            "interface",
+            "ipv4",
+            "set",
+            "subinterface",
+            name,
+            &format!("mtu={}", mtu),
+            "store=persistent",
+        ])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "netsh set mtu failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )))
     }
 }
 
 #[cfg(target_os = "windows")]
 #[async_trait::async_trait]
-impl VirtualNic for WindowsWintun {
-    async fn read_frame(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
-        unimplemented!("Wintun backend")
+impl VirtualNic for WindowsTap {
+    async fn read_frame(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self.recv_rx.recv().await {
+            Some(frame) => {
+                let n = frame.len().min(buf.len());
+                buf[..n].copy_from_slice(&frame[..n]);
+                Ok(n)
+            }
+            None => Err(io::Error::other("TAP receive channel closed")),
+        }
     }
 
-    async fn write_frame(&mut self, _frame: &[u8]) -> io::Result<()> {
-        unimplemented!("Wintun backend")
+    async fn write_frame(&mut self, frame: &[u8]) -> io::Result<()> {
+        self.send_tx
+            .send(frame.to_vec())
+            .map_err(|e| io::Error::other(format!("TAP send channel closed: {e}")))?;
+        Ok(())
     }
 
     fn name(&self) -> &str {

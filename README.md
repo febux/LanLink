@@ -1,10 +1,13 @@
-# LanLink — Cross-Platform Virtual LAN
+# LanLink — Linux-first Virtual LAN
 
-A free, cross-platform, peer-to-peer virtual LAN (layer-2 mesh VPN) inspired by
-Radmin VPN. Built for gaming, remote access, and connecting distributed teams without
-port forwarding or centralized accounts.
+A free, peer-to-peer virtual LAN (layer-2 mesh VPN) inspired by Radmin VPN. Built
+for gaming, remote access, and connecting distributed teams without port
+forwarding or centralized accounts.
 
-**Platforms**: Linux · Windows · macOS (x86_64 + ARM64)
+**Current status**: Linux is fully functional. Windows and macOS support is
+under active development (Wintun/utun backends are stubbed). This release is
+aimed at Linux users who want a working alternative to Radmin VPN today;
+cross-platform parity is the next milestone.
 
 **Stack**: Rust workspace (daemon, CLI, coordinator) + self-hostable Go/Rust relay
 (architecture decision in [`PLAN.md`](./PLAN.md)).
@@ -25,37 +28,44 @@ Key design points:
   connection is impossible.
 - **End-to-end encryption**: the coordinator only helps with membership; it cannot
   decrypt traffic.
-- **Cross-platform**: same codebase supports Linux TAP, Windows Wintun, and macOS utun.
+- **Cross-platform foundation**: Linux TAP is production-ready; Windows uses the
+  OpenVPN TAP-Windows6 driver (new, needs testing); macOS utun is stubbed.
+  See [`docs/windows-plan.md`](./docs/windows-plan.md) for the Windows testing
+  checklist and [`docs/tcp-teredo-plan.md`](./docs/tcp-teredo-plan.md) and
+  [`docs/noise-identity-plan.md`](./docs/noise-identity-plan.md) for upcoming
+  protocol work.
 
 ## Project status
 
 Implemented so far:
 
-- **M0–M2** — encrypted two-node ping, MAC-learning switch, broadcast/flooding, and PMTU
-  fragmentation/reassembly.
-- **M3** — coordinator REST API for create/join/list networks plus a daemon mode that joins
-  via the coordinator and floods frames to peers.
-- **M4–M5** — STUN-based NAT traversal, UDP hole punching, and fallback to a custom
-  content-blind UDP relay (`lanlink-relayd`).
-- **M6** — gateway mode (proxy-ARP, ip_forward, MASQUERADE, peer route sync) and a
-  public/gaming-network inbound firewall profile (nftables on Linux).
-- **M7** — TOML config files + `password_file` secrets, graceful SIGTERM shutdown with
-  cleanup, crash-safe firewall/route re-application, `lanlinkd service` management
-  (systemd template unit + Windows SCM), sd_notify watchdog, and packaging: deb / rpm /
-  AUR / macOS pkg / Windows service (see [`dist/README.md`](./dist/README.md)).
-- **M8** — public directory server (`GET /directory`), opt-in anonymized telemetry
-  (`POST /telemetry`, `GET /metrics`, `lanlinkctl coord metrics`), and a static documentation
-  site under [`docs/`](./docs).
-- **M9** — terminal UI (`lanlink-tui`) plus the daemon local status API it is built on:
-  a read-only Unix-socket snapshot endpoint (peers, direct/relay path classification,
-  per-peer traffic counters, latency probes), with PING/PONG RTT measurement and a
-  keepalive liveness fix in the switch core.
-- **M9+** — browser WebUI (`lanlink-web`) that proxies the daemon status socket and
-  coordinator REST API into a vanilla-JS SPA. Dashboard, peers, public directory,
-  and create/join network flows.
-- Linux TAP backend; Windows Wintun and macOS utun are stubbed and ready to be wired.
+- **Linux data plane** — encrypted two-node ping, MAC-learning switch, broadcast/flooding,
+  and PMTU fragmentation/reassembly.
+- **Linux virtual NIC** — TAP backend using `/dev/net/tun` and `iproute2` setup.
+- **Coordinator REST API** — create/join/list networks, public directory, opt-in telemetry.
+- **NAT traversal** — STUN-based UDP hole punching with fallback to a custom content-blind
+  UDP relay (`lanlink-relayd`).
+- **Gateway + firewall** — Linux-only gateway mode (proxy-ARP, NAT, route push) and a
+  public/gaming-network inbound firewall profile (`nftables`).
+- **Frontends** — terminal UI (`lanlink-tui`), browser WebUI (`lanlink-web`), Tauri
+  desktop shell (`lanlink-desktop`), and unified launcher (`lanlink-gui`).
+- **Packaging** — systemd unit, deb/rpm/AUR helpers, and WiX/MSI scaffolding
+  (see [`dist/README.md`](./dist/README.md)).
 
-Next up: broader cross-platform CI and public beta soak testing.
+**Not yet ready**:
+
+- **Windows TAP-Windows6 backend** — implemented using the `tap-windows` crate.
+  Requires the OpenVPN TAP-Windows6 driver to be installed on the Windows machine.
+  This is new and needs real-machine testing.
+- **macOS utun backend** — stubbed.
+- **TCP/Teredo fallback** — protocol and database schema are prepared; only the actual
+  TCP transport implementation remains. See [`docs/tcp-teredo-plan.md`](./docs/tcp-teredo-plan.md).
+- **Per-device identity keys** — protocol fields and coordinator storage are ready; the
+  Noise/Ed25519 handshake still needs to be wired. See
+  [`docs/noise-identity-plan.md`](./docs/noise-identity-plan.md).
+
+Next up: real-machine Windows testing, then TCP transport implementation, then
+Noise handshake integration.
 
 See [`PLAN.md`](./PLAN.md) for the full research analysis, architecture, roadmap, and
 cross-platform plan.
@@ -89,7 +99,7 @@ lanlink/
 
 ## Quick start (install)
 
-### Linux — one command
+### Linux — ready today
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/febux/LanLink/master/dist/install.sh | sh
@@ -97,27 +107,37 @@ LANLINK_PASSWORD=hunter2 sudo -E lanlinkd service up gaming-night
 lanlink-desktop
 ```
 
-### Windows — one command
-
-Run in an **elevated PowerShell**:
-
-```powershell
-irm https://raw.githubusercontent.com/febux/LanLink/master/dist/windows/install.ps1 | iex
-lanlinkd service up --name gaming-night --password hunter2
-```
-
-Then open **LanLink** from the Start Menu.
-
-### macOS
-
-Download the latest `.pkg` from [GitHub Releases](https://github.com/lanlink/lanlink/releases)
-and run:
-
-```bash
-sudo installer -pkg lanlink-*-macos-*.pkg -target /
-```
-
 For full install options see [`docs/install.md`](./docs/install.md).
+
+### Windows — experimental
+
+LanLink on Windows uses the OpenVPN TAP-Windows6 driver for layer-2 Ethernet
+frames. Before running LanLink you must install that driver:
+
+1. Download the TAP-Windows6 installer from the
+   [OpenVPN community downloads](https://openvpn.net/community-downloads/) page
+   (look for "tap-windows"), or install any OpenVPN client that includes it.
+2. Build LanLink from source on a Windows machine with Rust installed:
+   ```powershell
+   cargo build --workspace --release
+   ```
+3. Run the coordinator (or point to an existing one):
+   ```powershell
+   cargo run -p coordinator -- --db lanlink.db
+   ```
+4. In another elevated PowerShell, start the daemon:
+   ```powershell
+   $env:LANLINK_PASSWORD="hunter2"
+   cargo run -p lanlinkd -- up --name gaming-night --coordinator http://COORD_IP:8080
+   ```
+   You may need to allow the TAP adapter through the Windows firewall.
+5. Open the WebUI or TUI from a non-elevated terminal:
+   ```powershell
+   cargo run -p lanlink-web
+   ```
+
+The Windows backend is brand-new and has not yet been tested on real hardware.
+Feedback and bug reports are welcome.
 
 ## Quick start (development)
 
@@ -278,30 +298,31 @@ make test
 
 ## Roadmap snapshot
 
-| Milestone | Goal |
-|---|---|
-| M0 | Platform NIC spikes (TAP/Wintun/utun) |
-| M1 | Encrypted two-node ping over direct UDP |
-| M2 | MAC-learning switch, broadcast, fragmentation |
-| M3 | Coordinator: create/join by name+password |
-| M4 | NAT traversal: STUN, hole punch, relay fallback |
-| M5 | Relay server (coturn-compatible) |
-| M6 | Gateway mode + gaming-network firewall |
-| M7 | Packaging: Linux/Windows/macOS installers |
-| M8 | v1.0 public beta |
-| M9 | Terminal UI + daemon status API |
-| M9+ | Browser WebUI (`lanlink-web`) + unified GUI launcher (`lanlink-gui`) + native desktop UI (`lanlink-desktop` via Tauri) |
+| Milestone | Goal | Status |
+|---|---|---|
+| M0 | Linux TAP backend | ✅ Done |
+| M1 | Encrypted two-node ping over direct UDP | ✅ Done |
+| M2 | MAC-learning switch, broadcast, fragmentation | ✅ Done |
+| M3 | Coordinator: create/join by name+password | ✅ Done |
+| M4 | NAT traversal: STUN, hole punch, UDP relay fallback | ✅ Done |
+| M5 | Relay server (`lanlink-relayd`) | ✅ Done |
+| M6 | Gateway mode + gaming-network firewall (Linux) | ✅ Done |
+| M7 | Linux packaging + service management | ✅ Done |
+| M8 | Windows TAP-Windows6 backend | 🚧 Implemented, needs testing |
+| M9 | TCP/Teredo fallback | 🚧 Protocol + schema ready, transport pending |
+| M10 | Per-device Noise/Ed25519 identity keys | 🚧 Storage ready, handshake pending |
+| M11 | macOS utun backend + cross-platform CI | ⏳ Planned |
 
 Full details and acceptance criteria are in [`PLAN.md`](./PLAN.md) §9.
 
 ## Security model
 
 - Traffic is end-to-end encrypted with ChaCha20-Poly1305 (or AES-256-GCM) and authenticated
-  per peer.
-- The network password is stretched with Argon2id to produce a network PSK; the coordinator
-  never sees the password.
-- Pairwise sessions will migrate to the Noise protocol framework for identity-based
-  authentication and forward secrecy.
+  per peer using a network-wide PSK derived from the network password.
+- The network password is stretched with Argon2id; the coordinator never sees the password.
+- **Current limitation**: all peers in a network share the same PSK. Pairwise sessions will
+  migrate to the Noise protocol framework with per-device Ed25519/X25519 identity keys for
+  identity-based authentication and forward secrecy.
 - The daemon runs with elevated privileges only for virtual-NIC management; on Linux it can
   be constrained to `CAP_NET_ADMIN` / `CAP_NET_RAW`.
 

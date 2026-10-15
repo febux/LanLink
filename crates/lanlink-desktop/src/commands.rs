@@ -147,6 +147,8 @@ pub async fn join_network(
         public_key: vec![],
         direct_candidates: vec!["127.0.0.1:9000".parse().expect("static addr parses")],
         relay_candidates: vec![],
+        tcp_candidates: vec![],
+        tcp_relay_candidates: vec![],
         shared_subnet: shared_subnet.unwrap_or_default(),
     };
     do_join(&state.http, &state.coordinator, network_id, req)

@@ -12,6 +12,14 @@
 
 use thiserror::Error;
 
+pub mod identity;
+pub mod noise;
+
+pub use identity::{default_identity_path, ed25519_to_x25519_public, load_or_create, Identity};
+pub use noise::{Handshake, HandshakeAction, NoiseSession};
+
+use rand::rngs::OsRng;
+
 #[derive(Debug, Error)]
 pub enum CryptoError {
     #[error("noise protocol error")]
@@ -207,11 +215,6 @@ impl Default for ReplayWindow {
         Self::new()
     }
 }
-
-/// Placeholder for a Noise handshake builder.
-pub struct SessionBuilder;
-
-use rand::rngs::OsRng;
 
 #[cfg(test)]
 mod tests {

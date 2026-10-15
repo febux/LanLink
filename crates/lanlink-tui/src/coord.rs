@@ -106,6 +106,8 @@ pub async fn run_action(
                 public_key: vec![],
                 direct_candidates: vec![candidate],
                 relay_candidates: vec![],
+                tcp_candidates: vec![],
+                tcp_relay_candidates: vec![],
                 shared_subnet: String::new(),
             };
             let resp: JoinNetworkResponse = client

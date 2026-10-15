@@ -504,6 +504,8 @@ fn path_style(path: lanlink_proto::status::PathKind) -> Style {
     match path {
         PathKind::Direct => Style::new().fg(Color::Green),
         PathKind::Relay => Style::new().fg(Color::Yellow),
+        PathKind::TcpDirect => Style::new().fg(Color::LightGreen),
+        PathKind::TcpRelay => Style::new().fg(Color::LightYellow),
         PathKind::Punching => Style::new().fg(Color::Cyan),
         PathKind::Waiting => Style::new().dim(),
     }

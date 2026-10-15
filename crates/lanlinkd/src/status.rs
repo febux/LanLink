@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use lanlink_proto::status::{DaemonStatus, PathKind, PeerStatus, StatusResponse, StatusSnapshot};
 use lanlink_proto::{NodeId, VirtualIp};
+use lanlink_switch::Transport;
 use tokio::sync::Mutex;
 
 use crate::Metrics;
@@ -113,7 +114,8 @@ impl StatusState {
             .map(|(id, m)| {
                 let stat = stats.iter().find(|s| s.node_id == *id);
                 let endpoint = stat.map(|s| s.addr);
-                let path = classify_path(*id, endpoint, &punching, info.as_ref());
+                let transport = stat.map(|s| s.transport).unwrap_or(Transport::Udp);
+                let path = classify_path(*id, endpoint, transport, &punching, info.as_ref());
                 PeerStatus {
                     node_id: *id,
                     virtual_ip: m
@@ -173,6 +175,7 @@ impl StatusState {
 fn classify_path(
     id: NodeId,
     endpoint: Option<SocketAddr>,
+    transport: Transport,
     punching: &HashSet<NodeId>,
     info: Option<&DaemonInfo>,
 ) -> PathKind {
@@ -180,16 +183,20 @@ fn classify_path(
         return PathKind::Punching;
     }
     match endpoint {
-        Some(addr) => {
-            let is_relay = info
-                .map(|i| i.relay_servers.contains(&addr))
-                .unwrap_or(false);
-            if is_relay {
-                PathKind::Relay
-            } else {
-                PathKind::Direct
+        Some(addr) => match transport {
+            Transport::TcpDirect => PathKind::TcpDirect,
+            Transport::TcpRelay => PathKind::TcpRelay,
+            Transport::Udp => {
+                let is_relay = info
+                    .map(|i| i.relay_servers.contains(&addr))
+                    .unwrap_or(false);
+                if is_relay {
+                    PathKind::Relay
+                } else {
+                    PathKind::Direct
+                }
             }
-        }
+        },
         None => PathKind::Waiting,
     }
 }
@@ -325,8 +332,11 @@ mod tests {
         lanlink_proto::PeerInfo {
             node_id: NodeId(id.to_be_bytes()),
             virtual_ip: VirtualIp(ip.parse().unwrap()),
+            public_key: vec![],
             direct_candidates: vec![],
             relay_candidates: relay.into_iter().collect(),
+            tcp_candidates: vec![],
+            tcp_relay_candidates: vec![],
             is_gateway: false,
             shared_subnet: String::new(),
         }

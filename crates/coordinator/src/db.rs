@@ -1,4 +1,5 @@
 use argon2::{password_hash::SaltString, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use base64::Engine;
 use rand::rngs::OsRng;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
@@ -36,6 +37,7 @@ async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
             password_hash TEXT NOT NULL,
             subnet TEXT NOT NULL,
             relay_servers TEXT NOT NULL DEFAULT '[]',
+            tcp_relay_servers TEXT NOT NULL DEFAULT '[]',
             is_public INTEGER NOT NULL DEFAULT 0
         );
 
@@ -47,6 +49,8 @@ async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
             virtual_ip TEXT NOT NULL,
             direct_candidates TEXT NOT NULL DEFAULT '[]',
             relay_candidates TEXT NOT NULL DEFAULT '[]',
+            tcp_candidates TEXT NOT NULL DEFAULT '[]',
+            tcp_relay_candidates TEXT NOT NULL DEFAULT '[]',
             is_gateway INTEGER NOT NULL DEFAULT 0,
             shared_subnet TEXT NOT NULL DEFAULT '',
             last_seen INTEGER NOT NULL,
@@ -81,6 +85,10 @@ async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await;
     let _ =
+        sqlx::query("ALTER TABLE networks ADD COLUMN tcp_relay_servers TEXT NOT NULL DEFAULT '[]'")
+            .execute(pool)
+            .await;
+    let _ =
         sqlx::query("ALTER TABLE members ADD COLUMN relay_candidates TEXT NOT NULL DEFAULT '[]'")
             .execute(pool)
             .await;
@@ -94,6 +102,14 @@ async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     let _ = sqlx::query("ALTER TABLE members ADD COLUMN shared_subnet TEXT NOT NULL DEFAULT ''")
         .execute(pool)
         .await;
+    let _ = sqlx::query("ALTER TABLE members ADD COLUMN tcp_candidates TEXT NOT NULL DEFAULT '[]'")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE members ADD COLUMN tcp_relay_candidates TEXT NOT NULL DEFAULT '[]'",
+    )
+    .execute(pool)
+    .await;
 
     Ok(())
 }
@@ -121,16 +137,18 @@ pub async fn create_network(
     name: &str,
     password_hash: &str,
     relay_servers: &str,
+    tcp_relay_servers: &str,
     is_public: bool,
 ) -> anyhow::Result<i64> {
     let subnet = "26.0.0.0/24".to_string(); // M3: single default subnet
     let id = sqlx::query(
-        "INSERT INTO networks (name, password_hash, subnet, relay_servers, is_public) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO networks (name, password_hash, subnet, relay_servers, tcp_relay_servers, is_public) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(name)
     .bind(password_hash)
     .bind(subnet)
     .bind(relay_servers)
+    .bind(tcp_relay_servers)
     .bind(if is_public { 1 } else { 0 })
     .execute(pool)
     .await?
@@ -179,6 +197,8 @@ pub async fn upsert_member(
     public_key: &str,
     direct_candidates: &str,
     relay_candidates: &str,
+    tcp_candidates: &str,
+    tcp_relay_candidates: &str,
     is_gateway: bool,
     shared_subnet: &str,
 ) -> anyhow::Result<Ipv4Addr> {
@@ -198,10 +218,12 @@ pub async fn upsert_member(
     if let Some(ip) = existing {
         let ip = Ipv4Addr::from_str(&ip.0)?;
         sqlx::query(
-            "UPDATE members SET direct_candidates = ?, relay_candidates = ?, is_gateway = ?, shared_subnet = ?, last_seen = ? WHERE network_id = ? AND node_id = ?",
+            "UPDATE members SET direct_candidates = ?, relay_candidates = ?, tcp_candidates = ?, tcp_relay_candidates = ?, is_gateway = ?, shared_subnet = ?, last_seen = ? WHERE network_id = ? AND node_id = ?",
         )
         .bind(direct_candidates)
         .bind(relay_candidates)
+        .bind(tcp_candidates)
+        .bind(tcp_relay_candidates)
         .bind(if is_gateway { 1 } else { 0 })
         .bind(shared_subnet)
         .bind(now)
@@ -219,8 +241,8 @@ pub async fn upsert_member(
     let ip = assign_ip(pool, network_id, &subnet).await?;
 
     sqlx::query(
-        "INSERT INTO members (network_id, node_id, public_key, virtual_ip, direct_candidates, relay_candidates, is_gateway, shared_subnet, last_seen)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO members (network_id, node_id, public_key, virtual_ip, direct_candidates, relay_candidates, tcp_candidates, tcp_relay_candidates, is_gateway, shared_subnet, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(network_id)
     .bind(node_id.as_slice())
@@ -228,6 +250,8 @@ pub async fn upsert_member(
     .bind(ip.to_string())
     .bind(direct_candidates)
     .bind(relay_candidates)
+    .bind(tcp_candidates)
+    .bind(tcp_relay_candidates)
     .bind(if is_gateway { 1 } else { 0 })
     .bind(shared_subnet)
     .bind(now)
@@ -284,8 +308,8 @@ pub async fn list_peers(
     network_id: i64,
     exclude_node_id: &[u8; 8],
 ) -> anyhow::Result<Vec<lanlink_proto::PeerInfo>> {
-    let rows: Vec<(Vec<u8>, String, String, String, i64, String)> = sqlx::query_as(
-        "SELECT node_id, virtual_ip, direct_candidates, relay_candidates, is_gateway, shared_subnet FROM members
+    let rows: Vec<(Vec<u8>, String, String, String, String, String, String, i64, String)> = sqlx::query_as(
+        "SELECT node_id, virtual_ip, public_key, direct_candidates, relay_candidates, tcp_candidates, tcp_relay_candidates, is_gateway, shared_subnet FROM members
          WHERE network_id = ? AND node_id != ?",
     )
     .bind(network_id)
@@ -294,7 +318,18 @@ pub async fn list_peers(
     .await?;
 
     let mut peers = Vec::new();
-    for (node_id_blob, ip_str, direct_json, relay_json, is_gateway, shared_subnet) in rows {
+    for (
+        node_id_blob,
+        ip_str,
+        public_key_b64,
+        direct_json,
+        relay_json,
+        tcp_json,
+        tcp_relay_json,
+        is_gateway,
+        shared_subnet,
+    ) in rows
+    {
         if node_id_blob.len() != 8 {
             continue;
         }
@@ -304,11 +339,21 @@ pub async fn list_peers(
             serde_json::from_str(&direct_json).unwrap_or_default();
         let relay_candidates: Vec<std::net::SocketAddr> =
             serde_json::from_str(&relay_json).unwrap_or_default();
+        let tcp_candidates: Vec<std::net::SocketAddr> =
+            serde_json::from_str(&tcp_json).unwrap_or_default();
+        let tcp_relay_candidates: Vec<std::net::SocketAddr> =
+            serde_json::from_str(&tcp_relay_json).unwrap_or_default();
+        let public_key = base64::engine::general_purpose::STANDARD
+            .decode(&public_key_b64)
+            .unwrap_or_default();
         peers.push(lanlink_proto::PeerInfo {
             node_id: lanlink_proto::NodeId(node_id),
             virtual_ip: lanlink_proto::VirtualIp(Ipv4Addr::from_str(&ip_str)?),
+            public_key,
             direct_candidates,
             relay_candidates,
+            tcp_candidates,
+            tcp_relay_candidates,
             is_gateway: is_gateway != 0,
             shared_subnet,
         });
@@ -322,6 +367,8 @@ pub async fn update_candidates(
     node_id: &[u8; 8],
     direct_candidates: &str,
     relay_candidates: &str,
+    tcp_candidates: &str,
+    tcp_relay_candidates: &str,
 ) -> anyhow::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -329,10 +376,12 @@ pub async fn update_candidates(
         .as_secs() as i64;
 
     sqlx::query(
-        "UPDATE members SET direct_candidates = ?, relay_candidates = ?, last_seen = ? WHERE network_id = ? AND node_id = ?",
+        "UPDATE members SET direct_candidates = ?, relay_candidates = ?, tcp_candidates = ?, tcp_relay_candidates = ?, last_seen = ? WHERE network_id = ? AND node_id = ?",
     )
     .bind(direct_candidates)
     .bind(relay_candidates)
+    .bind(tcp_candidates)
+    .bind(tcp_relay_candidates)
     .bind(now)
     .bind(network_id)
     .bind(node_id.as_slice())
@@ -350,6 +399,19 @@ pub async fn get_network_relay_servers(
         .bind(network_id)
         .fetch_optional(pool)
         .await?;
+    let json = row.map(|r| r.0).unwrap_or_else(|| "[]".to_string());
+    Ok(serde_json::from_str(&json).unwrap_or_default())
+}
+
+pub async fn get_network_tcp_relay_servers(
+    pool: &SqlitePool,
+    network_id: i64,
+) -> anyhow::Result<Vec<std::net::SocketAddr>> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT tcp_relay_servers FROM networks WHERE id = ?")
+            .bind(network_id)
+            .fetch_optional(pool)
+            .await?;
     let json = row.map(|r| r.0).unwrap_or_else(|| "[]".to_string());
     Ok(serde_json::from_str(&json).unwrap_or_default())
 }

@@ -20,6 +20,14 @@ pub const PONG_PACKET_TYPE: u8 = 3;
 pub const PUNCH_PROBE_PACKET_TYPE: u8 = 4;
 pub const PUNCH_REPLY_PACKET_TYPE: u8 = 5;
 pub const KEEPALIVE_PACKET_TYPE: u8 = 6;
+/// Noise protocol handshake message.
+pub const NOISE_HANDSHAKE_PACKET_TYPE: u8 = 7;
+
+/// Outer header flag: packet payload is encrypted with a Noise transport session
+/// rather than the network-wide PSK.
+pub const FLAG_NOISE: u8 = 0x01;
+/// Outer header flag mask reserved for future use.
+pub const FLAG_RESERVED_MASK: u8 = 0xfe;
 
 /// Node identifier length in bytes.
 pub const NODE_ID_LEN: usize = 8;
@@ -100,6 +108,12 @@ pub struct JoinNetworkRequest {
     pub public_key: Vec<u8>,
     pub direct_candidates: Vec<std::net::SocketAddr>,
     pub relay_candidates: Vec<std::net::SocketAddr>,
+    /// TCP candidates for direct TCP fallback when UDP hole punching fails.
+    #[serde(default)]
+    pub tcp_candidates: Vec<std::net::SocketAddr>,
+    /// TCP relay candidates for environments where UDP is blocked.
+    #[serde(default)]
+    pub tcp_relay_candidates: Vec<std::net::SocketAddr>,
     /// Advertise this node as a gateway sharing its physical LAN subnet (e.g.
     /// "192.168.1.0/24"). Empty means no gateway role.
     #[serde(default)]
@@ -115,6 +129,9 @@ pub struct JoinNetworkResponse {
     /// Relay servers that this network may use for fallback traffic. The daemon
     /// binds to the first reachable one and advertises it as a relay candidate.
     pub relay_servers: Vec<std::net::SocketAddr>,
+    /// TCP relay servers for environments where UDP is blocked.
+    #[serde(default)]
+    pub tcp_relay_servers: Vec<std::net::SocketAddr>,
     /// Whether the network is flagged public/gaming, which enables the inbound
     /// firewall profile by default.
     pub is_public: bool,
@@ -125,11 +142,18 @@ pub struct JoinNetworkResponse {
 pub struct PeerInfo {
     pub node_id: NodeId,
     pub virtual_ip: VirtualIp,
+    pub public_key: Vec<u8>,
     pub direct_candidates: Vec<std::net::SocketAddr>,
     /// Relay server addresses this peer is reachable through. Traffic to these
     /// addresses is still E2E-encrypted; the relay only reads the outer receiver
     /// id to route the packet.
     pub relay_candidates: Vec<std::net::SocketAddr>,
+    /// TCP candidates for direct TCP fallback when UDP hole punching fails.
+    #[serde(default)]
+    pub tcp_candidates: Vec<std::net::SocketAddr>,
+    /// TCP relay candidates for environments where UDP is blocked.
+    #[serde(default)]
+    pub tcp_relay_candidates: Vec<std::net::SocketAddr>,
     /// True if this peer advertises itself as a gateway for its physical LAN.
     #[serde(default)]
     pub is_gateway: bool,
@@ -170,6 +194,12 @@ pub struct PresenceUpdate {
     /// that the node has bound to; peers send normal LanLink packets there and
     /// the relay forwards them based on the plaintext receiver id.
     pub relay_candidates: Vec<std::net::SocketAddr>,
+    /// TCP candidates for direct TCP fallback when UDP hole punching fails.
+    #[serde(default)]
+    pub tcp_candidates: Vec<std::net::SocketAddr>,
+    /// TCP relay candidates for environments where UDP is blocked.
+    #[serde(default)]
+    pub tcp_relay_candidates: Vec<std::net::SocketAddr>,
 }
 
 /// Relay bind message sent to a LanLink relay server over UDP.

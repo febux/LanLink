@@ -2,10 +2,10 @@ mod config;
 mod sdnotify;
 mod service;
 mod status;
+mod tcp;
 mod up;
 
 use clap::{Parser, Subcommand};
-use rand::RngCore;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -440,20 +440,29 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
 
     let client = reqwest::Client::new();
 
-    // Generate a stable-ish random node identity for this run.
-    let mut node_id = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut node_id);
-    let local = lanlink_proto::NodeId(node_id);
+    // Load or create the persistent Ed25519 identity for this installation.
+    // The node id is derived from the public key, so it is stable across runs.
+    let identity = load_or_create_identity()?;
+    let local = identity.node_id();
+    tracing::info!(node_id = %hex(&local.0), "loaded identity");
 
     let shared_subnet = shared_subnet.unwrap_or_default();
+
+    // Bind the TCP listener early so we can advertise its address in the join
+    // request. The UDP and TCP sockets can share the same port on Linux.
+    let (tcp_in_tx, tcp_in_rx) = tokio::sync::mpsc::unbounded_channel::<(SocketAddr, Vec<u8>)>();
+    let (tcp_transport, tcp_addr) = tcp::TcpTransport::bind(bind, tcp_in_tx).await?;
+    let tcp_candidates = lanlink_punch::gather_host_candidates(tcp_addr.port());
 
     let initial_candidates = lanlink_punch::gather_host_candidates(bind.port());
     let join_req = lanlink_proto::JoinNetworkRequest {
         password: password.clone(),
         node_id: local,
-        public_key: Vec::new(), // identity keys are added when we switch to Noise
+        public_key: identity.public_key().to_vec(),
         direct_candidates: initial_candidates.iter().map(|c| c.addr).collect(),
         relay_candidates: Vec::new(), // updated after we bind to the network relay
+        tcp_candidates: tcp_candidates.iter().map(|c| c.addr).collect(),
+        tcp_relay_candidates: Vec::new(),
         shared_subnet: shared_subnet.clone(),
     };
 
@@ -528,6 +537,7 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
     let psk = lanlink_crypto::derive_network_psk(&password, network_id);
     let session = lanlink_crypto::StaticSession::new(psk);
     let mut switch = lanlink_switch::Switch::new(local, session.clone());
+    switch.set_identity(identity.clone());
     switch.sync_peers(&resp.peers);
     let switch = Arc::new(Mutex::new(switch));
 
@@ -553,7 +563,7 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
     // packets addressed to us. Traffic remains E2E-encrypted.
     let local_relay = bind_to_relay(&socket, local, &resp.relay_servers).await;
     if let Some(addr) = local_relay {
-        tracing::info!(%addr, "bound to relay server");
+        tracing::info!(%addr, "bound to UDP relay server");
         let socket_kp = socket.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(25));
@@ -561,8 +571,28 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
                 interval.tick().await;
                 let bind = lanlink_relay::encode_bind(local);
                 if let Err(e) = socket_kp.send_to(&bind, addr).await {
-                    tracing::debug!(%addr, error = %e, "relay keepalive failed");
+                    tracing::debug!(%addr, error = %e, "UDP relay keepalive failed");
                 }
+            }
+        });
+    }
+
+    // Bind to a TCP relay server if one is configured. The relay is
+    // content-blind: it only learns our node id, then forwards encrypted
+    // packets addressed to us.
+    let local_tcp_relay = resp.tcp_relay_servers.first().copied();
+    if let Some(addr) = local_tcp_relay {
+        tracing::info!(%addr, "bound to TCP relay server");
+        tcp_transport.connect(addr);
+        let bind = lanlink_relay::encode_bind(local);
+        tcp_transport.send(addr, bind);
+        let tcp_kp = tcp_transport.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(25));
+            loop {
+                interval.tick().await;
+                let bind = lanlink_relay::encode_bind(local);
+                tcp_kp.send(addr, bind);
             }
         });
     }
@@ -614,6 +644,7 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
         puncher.clone(),
         switch.clone(),
         punching.clone(),
+        tcp_transport.clone(),
         resp.peers,
     )
     .await;
@@ -627,6 +658,8 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
     let refresh_route_manager = route_manager.clone();
     let refresh_registry = registry.clone();
     let local_relay_for_refresh = local_relay;
+    let local_tcp_relay_for_refresh = local_tcp_relay;
+    let refresh_tcp = tcp_transport.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
@@ -640,6 +673,9 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
                 &refresh_switch,
                 &refresh_punching,
                 local_relay_for_refresh,
+                tcp_addr,
+                local_tcp_relay_for_refresh,
+                refresh_tcp.clone(),
             )
             .await
             {
@@ -753,6 +789,8 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
         nic,
         switch,
         socket,
+        tcp_transport,
+        tcp_in_rx,
         puncher,
         punching,
         gateway_manager.clone(),
@@ -842,6 +880,9 @@ async fn refresh_candidates_and_punch(
     switch: &Arc<Mutex<lanlink_switch::Switch>>,
     punching: &Arc<Mutex<HashSet<lanlink_proto::NodeId>>>,
     local_relay: Option<SocketAddr>,
+    local_tcp_addr: SocketAddr,
+    local_tcp_relay: Option<SocketAddr>,
+    tcp_transport: tcp::TcpTransport,
 ) -> anyhow::Result<Vec<lanlink_proto::PeerInfo>> {
     let mut candidates = puncher.gather_candidates().await;
     if let Some(relay) = local_relay {
@@ -852,6 +893,7 @@ async fn refresh_candidates_and_punch(
     }
     tracing::debug!(count = candidates.len(), "gathered local candidates");
 
+    let tcp_candidates = lanlink_punch::gather_host_candidates(local_tcp_addr.port());
     let update = lanlink_proto::PresenceUpdate {
         node_id: local_node,
         direct_candidates: candidates
@@ -864,6 +906,8 @@ async fn refresh_candidates_and_punch(
             .filter(|c| matches!(c.kind, lanlink_punch::CandidateKind::Relay))
             .map(|c| c.addr)
             .collect(),
+        tcp_candidates: tcp_candidates.into_iter().map(|c| c.addr).collect(),
+        tcp_relay_candidates: local_tcp_relay.into_iter().collect(),
     };
 
     let url = format!("{}/networks/{}/candidates", coordinator, network_id);
@@ -886,6 +930,7 @@ async fn refresh_candidates_and_punch(
         puncher.clone(),
         switch.clone(),
         punching.clone(),
+        tcp_transport,
         peers.clone(),
     )
     .await;
@@ -902,6 +947,7 @@ async fn punch_peers(
     puncher: Arc<lanlink_punch::Puncher>,
     switch: Arc<Mutex<lanlink_switch::Switch>>,
     punching: Arc<Mutex<HashSet<lanlink_proto::NodeId>>>,
+    tcp_transport: tcp::TcpTransport,
     peers: Vec<lanlink_proto::PeerInfo>,
 ) {
     for peer in peers {
@@ -921,9 +967,12 @@ async fn punch_peers(
         let punching = punching.clone();
         let coordinator = coordinator.clone();
         let client = client.clone();
+        let tcp_transport = tcp_transport.clone();
         let peer_id = peer.node_id;
         let direct_candidates = peer.direct_candidates.clone();
         let relay_candidates = peer.relay_candidates.clone();
+        let tcp_candidates = peer.tcp_candidates.clone();
+        let tcp_relay_candidates = peer.tcp_relay_candidates.clone();
 
         tokio::spawn(async move {
             tracing::info!(?peer_id, "starting hole punch");
@@ -958,12 +1007,30 @@ async fn punch_peers(
                         tracing::debug!(?peer_id, error = %e2, "single peer candidate refresh failed");
                     }
 
-                    // If the peer advertised a relay candidate, fall back to it.
-                    // Traffic remains E2E-encrypted; the relay only routes by
-                    // receiver node id.
-                    if let Some(relay_addr) = relay_candidates.first() {
-                        tracing::info!(?peer_id, %relay_addr, "falling back to relay path");
+                    // Fallback ordering: direct paths (UDP then TCP) are
+                    // preferred over relay paths (UDP then TCP). Traffic stays
+                    // E2E-encrypted on every path.
+                    if let Some(tcp_addr) = tcp_candidates.first() {
+                        tracing::info!(?peer_id, %tcp_addr, "falling back to TCP direct path");
+                        tcp_transport.connect(*tcp_addr);
+                        {
+                            let mut sw = switch.lock().await;
+                            sw.set_peer_addr(peer_id, *tcp_addr);
+                            sw.set_peer_transport(peer_id, lanlink_switch::Transport::TcpDirect);
+                        }
+                    } else if let Some(relay_addr) = relay_candidates.first() {
+                        tracing::info!(?peer_id, %relay_addr, "falling back to UDP relay path");
                         switch.lock().await.set_peer_addr(peer_id, *relay_addr);
+                    } else if let Some(tcp_relay) = tcp_relay_candidates.first() {
+                        tracing::info!(?peer_id, %tcp_relay, "falling back to TCP relay path");
+                        tcp_transport.connect(*tcp_relay);
+                        let bind = lanlink_relay::encode_bind(local_node);
+                        tcp_transport.send(*tcp_relay, bind);
+                        {
+                            let mut sw = switch.lock().await;
+                            sw.set_peer_addr(peer_id, *tcp_relay);
+                            sw.set_peer_transport(peer_id, lanlink_switch::Transport::TcpRelay);
+                        }
                     }
                 }
             }
@@ -993,6 +1060,8 @@ async fn refresh_single_peer_candidates(
             .filter(|c| matches!(c.kind, lanlink_punch::CandidateKind::Relay))
             .map(|c| c.addr)
             .collect(),
+        tcp_candidates: Vec::new(),
+        tcp_relay_candidates: Vec::new(),
     };
 
     let url = format!("{}/networks/{}/candidates", coordinator, network_id);
@@ -1031,16 +1100,19 @@ async fn start_coordinated_pump(
     nic: Arc<Mutex<Box<dyn lanlink_tap::VirtualNic>>>,
     switch: Arc<Mutex<lanlink_switch::Switch>>,
     socket: Arc<tokio::net::UdpSocket>,
+    tcp_transport: tcp::TcpTransport,
+    tcp_incoming: tokio::sync::mpsc::UnboundedReceiver<(SocketAddr, Vec<u8>)>,
     puncher: Arc<lanlink_punch::Puncher>,
     _punching: Arc<Mutex<HashSet<lanlink_proto::NodeId>>>,
     gateway_manager: Option<Arc<lanlink_gateway::GatewayManager>>,
     metrics: Arc<Metrics>,
     mtu: usize,
 ) -> anyhow::Result<()> {
-    // TAP -> UDP
+    // TAP -> network
     let nic_tx = nic.clone();
     let switch_tx = switch.clone();
     let socket_tx = socket.clone();
+    let tcp_tx = tcp_transport.clone();
     let metrics_tx = metrics.clone();
     let mut tx_task = tokio::spawn(async move {
         let mut buf = vec![0u8; mtu + 128];
@@ -1065,10 +1137,17 @@ async fn start_coordinated_pump(
                 }
             };
             let mut sent_bytes = 0usize;
-            for (peer, packet) in packets {
-                sent_bytes += packet.len();
-                if let Err(e) = socket_tx.send_to(&packet, peer).await {
-                    tracing::debug!(error = %e, %peer, "UDP send failed");
+            for out in packets {
+                sent_bytes += out.packet.len();
+                match out.transport {
+                    lanlink_switch::Transport::Udp => {
+                        if let Err(e) = socket_tx.send_to(&out.packet, out.addr).await {
+                            tracing::debug!(error = %e, addr = %out.addr, "UDP send failed");
+                        }
+                    }
+                    lanlink_switch::Transport::TcpDirect | lanlink_switch::Transport::TcpRelay => {
+                        tcp_tx.send(out.addr, out.packet);
+                    }
                 }
             }
             metrics_tx.add_tx(sent_bytes);
@@ -1081,7 +1160,7 @@ async fn start_coordinated_pump(
     let switch_rx = switch.clone();
     let socket_rx = socket.clone();
     let puncher_rx = puncher.clone();
-    let gateway_rx = gateway_manager;
+    let gateway_rx = gateway_manager.clone();
     let metrics_rx = metrics.clone();
     let mut rx_task = tokio::spawn(async move {
         let mut buf = vec![0u8; mtu + 256];
@@ -1121,7 +1200,7 @@ async fn start_coordinated_pump(
                         }
                     }
                 }
-                _ => match switch_rx.lock().await.on_udp_packet(from, packet) {
+                _ => match switch_rx.lock().await.on_packet(from, packet) {
                     Ok(lanlink_switch::UdpOutcome::Frame(frame)) => {
                         // Gateway mode: intercept ARP requests for the shared
                         // subnet and reply on behalf of the physical LAN.
@@ -1142,6 +1221,11 @@ async fn start_coordinated_pump(
                             tracing::debug!(%from, error = %e, "probe reply send failed");
                         }
                     }
+                    Ok(lanlink_switch::UdpOutcome::HandshakeReply(reply)) => {
+                        if let Err(e) = socket_rx.send_to(&reply, from).await {
+                            tracing::debug!(%from, error = %e, "handshake reply send failed");
+                        }
+                    }
                     Ok(lanlink_switch::UdpOutcome::Ignored) => {
                         tracing::trace!(%from, "dropped/fragment not ready/keepalive");
                     }
@@ -1153,27 +1237,75 @@ async fn start_coordinated_pump(
         }
     });
 
+    // TCP -> switch. Incoming packets from direct TCP peers and TCP relay
+    // servers share the same outer framing as UDP packets, so they are fed
+    // into the switch as if they had arrived over UDP. Replies (handshakes,
+    // PONGs) are written back to the same TCP connection.
+    let switch_tcp = switch.clone();
+    let mut tcp_rx = tcp_incoming;
+    let tcp_reply = tcp_transport.clone();
+    let nic_tcp = nic.clone();
+    let gateway_tcp = gateway_manager.clone();
+    let mut tcp_task = tokio::spawn(async move {
+        while let Some((from, packet)) = tcp_rx.recv().await {
+            match switch_tcp.lock().await.on_packet(from, &packet) {
+                Ok(lanlink_switch::UdpOutcome::Frame(frame)) => {
+                    let out_frame = if let Some(ref gw) = gateway_tcp {
+                        gw.process_inbound_frame(&frame).unwrap_or(frame)
+                    } else {
+                        frame
+                    };
+                    if let Err(e) = nic_tcp.lock().await.write_frame(&out_frame).await {
+                        tracing::error!(error = %e, "TAP write failed");
+                    } else {
+                        tracing::trace!(bytes = out_frame.len(), "wrote decrypted frame");
+                    }
+                }
+                Ok(lanlink_switch::UdpOutcome::Reply(reply)) => {
+                    tcp_reply.send(from, reply);
+                }
+                Ok(lanlink_switch::UdpOutcome::HandshakeReply(reply)) => {
+                    tcp_reply.send(from, reply);
+                }
+                Ok(lanlink_switch::UdpOutcome::Ignored) => {
+                    tracing::trace!(%from, "dropped/fragment not ready/keepalive");
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, %from, "failed to process TCP packet");
+                }
+            }
+        }
+    });
+
     // Keepalive: send an empty authenticated packet to every known peer every
     // 20 s to keep NAT mappings alive.
     let switch_kp = switch.clone();
     let socket_kp = socket.clone();
+    let tcp_kp = tcp_transport.clone();
     let mut kp_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(20));
         loop {
             interval.tick().await;
             let mut sw = switch_kp.lock().await;
             let peers = sw.peer_addrs();
-            let mut packets: Vec<(SocketAddr, Vec<u8>)> = Vec::new();
-            for (id, addr) in peers {
+            let mut packets: Vec<lanlink_switch::Outgoing> = Vec::new();
+            for (id, _addr) in peers {
                 match sw.seal_keepalive(id) {
-                    Ok(pkt) => packets.push((addr, pkt)),
+                    Ok(out) => packets.push(out),
                     Err(e) => tracing::debug!(?id, error = %e, "keepalive seal failed"),
                 }
             }
             drop(sw);
-            for (addr, pkt) in packets {
-                if let Err(e) = socket_kp.send_to(&pkt, addr).await {
-                    tracing::debug!(%addr, error = %e, "keepalive send failed");
+            for out in packets {
+                match out.transport {
+                    lanlink_switch::Transport::Udp => {
+                        if let Err(e) = socket_kp.send_to(&out.packet, out.addr).await {
+                            tracing::debug!(%out.addr, error = %e, "keepalive UDP send failed");
+                        }
+                    }
+                    lanlink_switch::Transport::TcpDirect | lanlink_switch::Transport::TcpRelay => {
+                        tcp_kp.send(out.addr, out.packet);
+                    }
                 }
             }
         }
@@ -1184,6 +1316,7 @@ async fn start_coordinated_pump(
     // stream as data packets; PONG replies are handled in the rx loop.
     let switch_ping = switch.clone();
     let socket_ping = socket.clone();
+    let tcp_ping = tcp_transport.clone();
     let mut ping_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
@@ -1192,16 +1325,23 @@ async fn start_coordinated_pump(
             {
                 let mut sw = switch_ping.lock().await;
                 let now = sw.probe_clock_ms();
-                for (id, addr) in sw.peer_addrs() {
+                for (id, _addr) in sw.peer_addrs() {
                     match sw.seal_ping(id, now) {
-                        Ok(pkt) => sends.push((addr, pkt)),
+                        Ok(out) => sends.push(out),
                         Err(e) => tracing::debug!(?id, error = %e, "ping seal failed"),
                     }
                 }
             }
-            for (addr, pkt) in sends {
-                if let Err(e) = socket_ping.send_to(&pkt, addr).await {
-                    tracing::debug!(%addr, error = %e, "ping send failed");
+            for out in sends {
+                match out.transport {
+                    lanlink_switch::Transport::Udp => {
+                        if let Err(e) = socket_ping.send_to(&out.packet, out.addr).await {
+                            tracing::debug!(%out.addr, error = %e, "ping UDP send failed");
+                        }
+                    }
+                    lanlink_switch::Transport::TcpDirect | lanlink_switch::Transport::TcpRelay => {
+                        tcp_ping.send(out.addr, out.packet);
+                    }
                 }
             }
         }
@@ -1212,11 +1352,13 @@ async fn start_coordinated_pump(
             tracing::info!("shutting down");
             tx_task.abort();
             rx_task.abort();
+            tcp_task.abort();
             kp_task.abort();
             ping_task.abort();
         }
         _ = &mut tx_task => {}
         _ = &mut rx_task => {}
+        _ = &mut tcp_task => {}
         _ = &mut kp_task => {}
         _ = &mut ping_task => {}
     }
@@ -1257,9 +1399,9 @@ async fn start_packet_pump(
                     continue;
                 }
             };
-            for (peer, packet) in packets {
-                if let Err(e) = socket_tx.send_to(&packet, peer).await {
-                    tracing::debug!(error = %e, %peer, "UDP send failed");
+            for out in packets {
+                if let Err(e) = socket_tx.send_to(&out.packet, out.addr).await {
+                    tracing::debug!(error = %e, addr = %out.addr, "UDP send failed");
                 }
             }
             tracing::trace!(bytes = n, "sent encrypted frame(s)");
@@ -1281,7 +1423,7 @@ async fn start_packet_pump(
                 }
             };
             let packet = &buf[..n];
-            match switch_rx.lock().await.on_udp_packet(from, packet) {
+            match switch_rx.lock().await.on_packet(from, packet) {
                 Ok(lanlink_switch::UdpOutcome::Frame(frame)) => {
                     if let Err(e) = nic_rx.lock().await.write_frame(&frame).await {
                         tracing::error!(error = %e, "TAP write failed");
@@ -1292,6 +1434,11 @@ async fn start_packet_pump(
                 Ok(lanlink_switch::UdpOutcome::Reply(reply)) => {
                     if let Err(e) = socket_rx.send_to(&reply, from).await {
                         tracing::debug!(%from, error = %e, "probe reply send failed");
+                    }
+                }
+                Ok(lanlink_switch::UdpOutcome::HandshakeReply(reply)) => {
+                    if let Err(e) = socket_rx.send_to(&reply, from).await {
+                        tracing::debug!(%from, error = %e, "handshake reply send failed");
                     }
                 }
                 Ok(lanlink_switch::UdpOutcome::Ignored) => {
@@ -1421,4 +1568,61 @@ fn node_id_from_u64(v: u64) -> lanlink_proto::NodeId {
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Load the persistent Ed25519 identity, creating one if it does not exist.
+fn load_or_create_identity() -> anyhow::Result<lanlink_crypto::Identity> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    // Prefer a system-wide location when running as root, otherwise fall back
+    // to the user's config directory.
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    #[cfg(unix)]
+    candidates.push(PathBuf::from("/var/lib/lanlink/identity.key"));
+    if let Some(home) = std::env::var_os("HOME") {
+        let mut p = PathBuf::from(home);
+        p.push(".config");
+        p.push("lanlink");
+        p.push("identity.key");
+        candidates.push(p);
+    }
+    #[cfg(windows)]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let mut p = PathBuf::from(appdata);
+        p.push("LanLink");
+        p.push("identity.key");
+        candidates.push(p);
+    }
+    candidates.push(PathBuf::from("/tmp/lanlink_identity.key"));
+
+    let path = candidates
+        .into_iter()
+        .find(|p| p.exists() || p.parent().map(|d| d.exists()).unwrap_or(false))
+        .unwrap_or_else(|| PathBuf::from("/tmp/lanlink_identity.key"));
+
+    if path.exists() {
+        let bytes = fs::read(&path)?;
+        if bytes.len() != 32 {
+            anyhow::bail!("identity file does not contain a 32-byte Ed25519 secret key");
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        return Ok(lanlink_crypto::Identity::from_secret_bytes(key));
+    }
+
+    let identity = lanlink_crypto::Identity::generate();
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(&path, identity.secret_key_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&path, perms)?;
+    }
+    tracing::info!(path = %path.display(), "created new identity");
+    Ok(identity)
 }

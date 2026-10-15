@@ -5,7 +5,7 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn candidate_update_returns_peer_list() {
     let pool = coordinator::db::connect_test().await.expect("db");
-    let app = coordinator::app(pool, vec![]);
+    let app = coordinator::app(pool, vec![], vec![]);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -44,6 +44,8 @@ async fn candidate_update_returns_peer_list() {
         public_key: vec![],
         direct_candidates: vec!["192.168.1.10:9000".parse().unwrap()],
         relay_candidates: vec![],
+        tcp_candidates: vec![],
+        tcp_relay_candidates: vec![],
         shared_subnet: String::new(),
     };
     let resp_a: lanlink_proto::JoinNetworkResponse = client
@@ -64,6 +66,8 @@ async fn candidate_update_returns_peer_list() {
         public_key: vec![],
         direct_candidates: vec!["192.168.1.20:9000".parse().unwrap()],
         relay_candidates: vec![],
+        tcp_candidates: vec![],
+        tcp_relay_candidates: vec![],
         shared_subnet: String::new(),
     };
     let resp_b: lanlink_proto::JoinNetworkResponse = client
@@ -85,6 +89,8 @@ async fn candidate_update_returns_peer_list() {
             "203.0.113.5:9000".parse().unwrap(),
         ],
         relay_candidates: vec![],
+        tcp_candidates: vec![],
+        tcp_relay_candidates: vec![],
     };
     let peers: Vec<lanlink_proto::PeerInfo> = client
         .post(format!("{}/networks/{}/candidates", base, network_id))
@@ -106,7 +112,7 @@ async fn candidate_update_returns_peer_list() {
 #[tokio::test]
 async fn directory_lists_only_public_networks() {
     let pool = coordinator::db::connect_test().await.expect("db");
-    let app = coordinator::app(pool, vec![]);
+    let app = coordinator::app(pool, vec![], vec![]);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -153,6 +159,8 @@ async fn directory_lists_only_public_networks() {
         public_key: vec![],
         direct_candidates: vec!["192.168.1.30:9000".parse().unwrap()],
         relay_candidates: vec![],
+        tcp_candidates: vec![],
+        tcp_relay_candidates: vec![],
         shared_subnet: String::new(),
     };
     client
@@ -185,7 +193,7 @@ async fn directory_lists_only_public_networks() {
 #[tokio::test]
 async fn resolve_network_creates_and_returns_existing() {
     let pool = coordinator::db::connect_test().await.expect("db");
-    let app = coordinator::app(pool, vec![]);
+    let app = coordinator::app(pool, vec![], vec![]);
 
     // First call creates the network.
     let req = lanlink_proto::ResolveNetworkRequest {
@@ -260,7 +268,7 @@ async fn resolve_network_creates_and_returns_existing() {
 #[tokio::test]
 async fn telemetry_records_and_aggregates() {
     let pool = coordinator::db::connect_test().await.expect("db");
-    let app = coordinator::app(pool, vec![]);
+    let app = coordinator::app(pool, vec![], vec![]);
 
     let report = lanlink_proto::telemetry::TelemetryReport {
         version: "0.1.0".to_string(),

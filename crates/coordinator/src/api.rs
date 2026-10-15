@@ -10,6 +10,8 @@ pub struct AppState {
     pub pool: sqlx::SqlitePool,
     /// Relay server addresses advertised to every network created on this coordinator.
     pub relay_servers: Vec<std::net::SocketAddr>,
+    /// TCP relay server addresses advertised to every network created on this coordinator.
+    pub tcp_relay_servers: Vec<std::net::SocketAddr>,
 }
 
 pub async fn create_network(
@@ -27,12 +29,17 @@ pub async fn create_network(
         Ok(s) => s,
         Err(_) => "[]".to_string(),
     };
+    let tcp_relay_servers_json = match serde_json::to_string(&state.tcp_relay_servers) {
+        Ok(s) => s,
+        Err(_) => "[]".to_string(),
+    };
 
     match crate::db::create_network(
         &state.pool,
         &req.name,
         &hash,
         &relay_servers_json,
+        &tcp_relay_servers_json,
         req.is_public,
     )
     .await
@@ -82,6 +89,14 @@ pub async fn join_network(
         Ok(s) => s,
         Err(_) => "[]".to_string(),
     };
+    let tcp_candidates_json = match serde_json::to_string(&req.tcp_candidates) {
+        Ok(s) => s,
+        Err(_) => "[]".to_string(),
+    };
+    let tcp_relay_candidates_json = match serde_json::to_string(&req.tcp_relay_candidates) {
+        Ok(s) => s,
+        Err(_) => "[]".to_string(),
+    };
     use base64::Engine;
     let public_key = base64::engine::general_purpose::STANDARD.encode(&req.public_key);
 
@@ -93,6 +108,8 @@ pub async fn join_network(
         &public_key,
         &direct_candidates_json,
         &relay_candidates_json,
+        &tcp_candidates_json,
+        &tcp_relay_candidates_json,
         is_gateway,
         &req.shared_subnet,
     )
@@ -121,6 +138,14 @@ pub async fn join_network(
                 Vec::new()
             }
         };
+    let tcp_relay_servers =
+        match crate::db::get_network_tcp_relay_servers(&state.pool, network_id as i64).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load TCP relay servers");
+                Vec::new()
+            }
+        };
 
     let is_public = crate::db::get_network_is_public(&state.pool, network_id as i64)
         .await
@@ -131,6 +156,7 @@ pub async fn join_network(
         assigned_ip: lanlink_proto::VirtualIp(assigned_ip),
         peers,
         relay_servers,
+        tcp_relay_servers,
         is_public,
     };
 
@@ -188,11 +214,16 @@ pub async fn resolve_network(
                 Ok(s) => s,
                 Err(_) => "[]".to_string(),
             };
+            let tcp_relay_servers_json = match serde_json::to_string(&state.tcp_relay_servers) {
+                Ok(s) => s,
+                Err(_) => "[]".to_string(),
+            };
             match crate::db::create_network(
                 &state.pool,
                 &req.name,
                 &hash,
                 &relay_servers_json,
+                &tcp_relay_servers_json,
                 req.is_public,
             )
             .await
@@ -275,6 +306,14 @@ pub async fn update_candidates(
         Ok(s) => s,
         Err(_) => "[]".to_string(),
     };
+    let tcp_candidates_json = match serde_json::to_string(&req.tcp_candidates) {
+        Ok(s) => s,
+        Err(_) => "[]".to_string(),
+    };
+    let tcp_relay_candidates_json = match serde_json::to_string(&req.tcp_relay_candidates) {
+        Ok(s) => s,
+        Err(_) => "[]".to_string(),
+    };
 
     if let Err(e) = crate::db::update_candidates(
         &state.pool,
@@ -282,6 +321,8 @@ pub async fn update_candidates(
         &req.node_id.0,
         &direct_candidates_json,
         &relay_candidates_json,
+        &tcp_candidates_json,
+        &tcp_relay_candidates_json,
     )
     .await
     {

@@ -4,7 +4,7 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn create_and_join_network() {
     let pool = coordinator::db::connect_test().await.unwrap();
-    let app = coordinator::app(pool, vec![]);
+    let app = coordinator::app(pool, vec![], vec![]);
 
     // Create network
     let create_req = lanlink_proto::CreateNetworkRequest {
@@ -40,6 +40,8 @@ async fn create_and_join_network() {
         public_key: vec![],
         direct_candidates: vec!["127.0.0.1:9000".parse().unwrap()],
         relay_candidates: vec![],
+        tcp_candidates: vec![],
+        tcp_relay_candidates: vec![],
         shared_subnet: String::new(),
     };
     let response = app
@@ -71,6 +73,8 @@ async fn create_and_join_network() {
         public_key: vec![],
         direct_candidates: vec![],
         relay_candidates: vec![],
+        tcp_candidates: vec![],
+        tcp_relay_candidates: vec![],
         shared_subnet: String::new(),
     };
     let response = app
@@ -94,6 +98,8 @@ async fn create_and_join_network() {
         public_key: vec![],
         direct_candidates: vec!["127.0.0.1:9001".parse().unwrap()],
         relay_candidates: vec![],
+        tcp_candidates: vec![],
+        tcp_relay_candidates: vec![],
         shared_subnet: "10.0.0.0/24".to_string(),
     };
     let response = app

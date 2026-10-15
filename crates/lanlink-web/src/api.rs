@@ -60,11 +60,7 @@ pub async fn snapshot(State(state): State<AppState>) -> impl IntoResponse {
             Json(json!({"error": "no daemon status socket found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::FORBIDDEN, Json(json!({"error": e}))).into_response(),
     }
 }
 
