@@ -30,10 +30,8 @@ Key design points:
   decrypt traffic.
 - **Cross-platform foundation**: Linux TAP is production-ready; Windows uses the
   OpenVPN TAP-Windows6 driver (new, needs testing); macOS utun is stubbed.
-  See [`docs/windows-plan.md`](./docs/windows-plan.md) for the Windows testing
-  checklist and [`docs/tcp-teredo-plan.md`](./docs/tcp-teredo-plan.md) and
-  [`docs/noise-identity-plan.md`](./docs/noise-identity-plan.md) for upcoming
-  protocol work.
+  See the `windows-parity` change under `openspec/changes/` for the Windows
+  testing checklist and remaining protocol work.
 
 ## Project status
 
@@ -58,14 +56,14 @@ Implemented so far:
   Requires the OpenVPN TAP-Windows6 driver to be installed on the Windows machine.
   This is new and needs real-machine testing.
 - **macOS utun backend** — stubbed.
-- **TCP/Teredo fallback** — protocol and database schema are prepared; only the actual
-  TCP transport implementation remains. See [`docs/tcp-teredo-plan.md`](./docs/tcp-teredo-plan.md).
-- **Per-device identity keys** — protocol fields and coordinator storage are ready; the
-  Noise/Ed25519 handshake still needs to be wired. See
-  [`docs/noise-identity-plan.md`](./docs/noise-identity-plan.md).
+- **TCP/Teredo fallback** — TCP direct and relay fallback are implemented
+  (see `openspec/changes/archive/2026-10-15-tcp-fallback/`); the Teredo/IPv6
+  phase is deferred to the `windows-parity` change.
+- **Per-device identity keys** — Noise/Ed25519 identity and pairwise sessions
+  are implemented (see `openspec/changes/archive/2026-10-15-noise-identity/`).
 
-Next up: real-machine Windows testing, then TCP transport implementation, then
-Noise handshake integration.
+Next up: real-machine Windows testing (see the `windows-parity` change under
+`openspec/changes/`).
 
 See [`PLAN.md`](./PLAN.md) for the full research analysis, architecture, roadmap, and
 cross-platform plan.
