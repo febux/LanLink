@@ -59,6 +59,11 @@
                         Start="auto"
                         ErrorControl="normal"
                         Vital="yes" />
+                    <!-- DEBUG ONLY: build with -d DebugNoAutostart=1 to omit
+                         Start="install" so the MSI never starts the service
+                         (no 1920/rollback; files stay on disk for manual
+                         `sc start LanLinkDaemon` debugging). -->
+                    <?ifndef DebugNoAutostart?>
                     <ServiceControl
                         Id="LanLinkDaemonControl"
                         Name="LanLinkDaemon"
@@ -66,6 +71,14 @@
                         Stop="both"
                         Remove="uninstall"
                         Wait="yes" />
+                    <?else?>
+                    <ServiceControl
+                        Id="LanLinkDaemonControl"
+                        Name="LanLinkDaemon"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+                    <?endif?>
                 </Component>
 
                 <!-- CLI -->

@@ -26,6 +26,11 @@
 #   SKIP_BUILD=1 skip stage 1 (useful when binaries are already staged)
 #   LL_GUI       Comma-separated: tui, web, desktop, all (default: all)
 #   TARGET       Rust target triple (default: x86_64-pc-windows-msvc)
+#   DEBUG_NO_AUTOSTART=1
+#                build a debug MSI that does NOT auto-start the service
+#                (passes -d DebugNoAutostart=1 to wix). Install completes
+#                without the 1920 start failure / rollback; start it manually
+#                with:  sc start LanLinkDaemon
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -142,6 +147,10 @@ WIX_GUI_DEFS=()
 [ "${WITH_TUI}" = 1 ] && WIX_GUI_DEFS+=(-d "IncludeTui=1")
 [ "${WITH_WEB}" = 1 ] && WIX_GUI_DEFS+=(-d "IncludeWeb=1")
 [ "${WITH_DESKTOP}" = 1 ] && WIX_GUI_DEFS+=(-d "IncludeDesktop=1")
+if [ "${DEBUG_NO_AUTOSTART:-0}" = "1" ]; then
+    WIX_GUI_DEFS+=(-d "DebugNoAutostart=1")
+    log "DEBUG build: service will NOT auto-start (sc start LanLinkDaemon)"
+fi
 
 wix build -arch x64 -acceptEula "${WIX_EULA_ID}" "${SCRIPT_DIR}/lanlink.wxs" \
     -d "Version=${VERSION}" \
