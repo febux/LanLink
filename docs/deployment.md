@@ -24,6 +24,18 @@ Replace `coord.example.com` with your domain throughout.
   copy the binary.
 - Root access on the VPS.
 
+### Install Rust on the VPS (if building there)
+
+```bash
+apt update && apt install -y curl build-essential pkg-config libssl-dev sqlite3 git
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+rustc --version
+```
+
+Log out and back in so `cargo` is available in the shell, or use `source
+$HOME/.cargo/env` before each cargo command.
+
 ---
 
 ## 1. Firewall
@@ -46,18 +58,30 @@ ufw enable
 Build directly on the VPS:
 
 ```bash
-apt update && apt install -y sqlite3 git
+apt update && apt install -y curl build-essential pkg-config libssl-dev sqlite3 git
+
+# Install rustup if it is not already present
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+
 # in the LanLink repo root
 cargo build --release -p coordinator
-install -Dm755 target/release/coordinator /usr/local/bin/lanlink-coordinator
+install -Dm755 target/release/lanlink-coordinator /usr/local/bin/lanlink-coordinator
 ```
 
 Or build locally and copy the binary:
 
 ```bash
-# local machine
+# local machine (assumes rustup/cargo is already installed)
 cargo build --release -p coordinator
-scp target/release/coordinator root@coord.example.com:/usr/local/bin/lanlink-coordinator
+scp target/release/lanlink-coordinator root@coord.example.com:/usr/local/bin/lanlink-coordinator
+```
+
+If you also deploy the relay from the same machine, copy it too:
+
+```bash
+cargo build --release -p lanlink-relay
+scp target/release/lanlink-relayd root@coord.example.com:/usr/local/bin/lanlink-relayd
 ```
 
 ---
@@ -160,6 +184,8 @@ If you advertised relay addresses above, run the relay server too. It is a
 single process that handles both UDP and TCP fallback.
 
 ```bash
+# Rust toolchain is already installed from section 2
+source "$HOME/.cargo/env"
 cargo build --release -p lanlink-relay
 install -Dm755 target/release/lanlink-relayd /usr/local/bin/lanlink-relayd
 ```

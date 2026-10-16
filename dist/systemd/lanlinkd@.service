@@ -13,6 +13,7 @@ Environment=RUST_LOG=info
 ExecStart=/usr/bin/lanlinkd run --config /etc/lanlink/%i.toml
 RuntimeDirectory=lanlink
 RuntimeDirectoryMode=0755
+ReadWritePaths=/var/lib/lanlink
 # The status socket is created mode 0666 by the daemon so any interactive user
 # can connect; no group membership is required for GUI frontends.
 Restart=on-failure
