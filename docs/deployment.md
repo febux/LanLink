@@ -7,11 +7,13 @@ advertises relay fallback addresses. Relay traffic itself is peer-to-end
 encrypted; the coordinator cannot decrypt it.
 
 This guide uses **Caddy** for automatic HTTPS because the coordinator has no
-native TLS support. The same machine can also run `lanlink-relayd`; relay
-deployment is included at the end so the advertised fallback addresses actually
-exist.
+native TLS support. The same machine can also run `lanlink-relayd` so the
+advertised relay fallback addresses actually exist. Client-side setup
+(systemd requirements, port conflicts, frontend flags) is covered in §7, and
+current deployment-relevant code limitations are listed in §12.
 
-Replace `coord.example.com` with your domain throughout.
+Replace `coord.example.com` with your domain, and `203.0.113.42` with your
+VPS public IP, throughout.
 
 ---
 
@@ -118,8 +120,8 @@ EnvironmentFile=/etc/lanlink/server.env
 ExecStart=/usr/local/bin/lanlink-coordinator \
   --listen 127.0.0.1:8080 \
   --db /var/lib/lanlink/lanlink.db \
-  --relay-server coord.example.com:3478 \
-  --tcp-relay-server coord.example.com:3479
+  --relay-server 203.0.113.42:3478 \
+  --tcp-relay-server 203.0.113.42:3479
 Restart=on-failure
 RestartSec=3
 
@@ -138,9 +140,18 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 WantedBy=multi-user.target
 ```
 
-Important: `--relay-server` and `--tcp-relay-server` must be the **public**
-addresses advertised to joining peers. If you omit them, the coordinator
-defaults to `127.0.0.1`, which is wrong for a public deployment.
+Important notes:
+
+- `--relay-server` and `--tcp-relay-server` must be the **public**
+  addresses advertised to joining peers. If you omit them, the coordinator
+  defaults to `127.0.0.1`, which is wrong for a public deployment.
+- These flags accept **IP addresses only, not hostnames** (`SocketAddr`
+  parsing). Replace `203.0.113.42` with your VPS's public IP (find it with
+  `curl -s ifconfig.me`). A hostname like `coord.example.com:3478` fails with
+  `invalid socket address syntax`. Clients still connect to the relay by IP,
+  which is fine; the domain is only needed for the coordinator HTTPS endpoint.
+- The `--listen` port stays on loopback (`127.0.0.1:8080`); Caddy is the only
+  public HTTP entry point.
 
 Enable the service:
 
@@ -232,14 +243,92 @@ Relay traffic is content-blind and end-to-end encrypted by peers.
 
 ## 7. Client bootstrap
 
-Peers only need the coordinator URL:
+Each peer needs the daemon (`lanlinkd`) and, optionally, a frontend. The only
+server-side value clients need is the coordinator HTTPS URL — relay addresses
+are returned in the coordinator's join response.
+
+### 7.1 Start the daemon as a systemd service
 
 ```bash
-LANLINK_PASSWORD='...' sudo -E lanlinkd up --name gaming-night \
+LANLINK_PASSWORD='...' sudo -E lanlinkd service up gaming-night \
   --coordinator https://coord.example.com
 ```
 
-Relay addresses are returned in the coordinator's join response.
+This resolves (or creates) the network, writes `/etc/lanlink/gaming-night.toml`
+and the password secret, installs the `lanlinkd@.service` template, and starts
+`lanlinkd@gaming-night.service`.
+
+### 7.2 systemd unit requirements (client)
+
+The daemon stores a persistent Ed25519 identity key in `/var/lib/lanlink/`.
+The service unit must allow writing there, and the directory must be owned by
+the `lanlink` service user:
+
+```bash
+sudo mkdir -p /var/lib/lanlink
+sudo chown -R lanlink:lanlink /var/lib/lanlink
+sudo chmod 750 /var/lib/lanlink
+```
+
+The unit template (`dist/systemd/lanlinkd@.service` in the repo) must contain:
+
+```ini
+RuntimeDirectory=lanlink
+RuntimeDirectoryMode=0755
+ReadWritePaths=/var/lib/lanlink
+```
+
+Without `ReadWritePaths=/var/lib/lanlink`, the daemon fails under
+`ProtectSystem=strict` with `Read-only file system (os error 30)`. If you
+installed from an older package, update the template at
+`/etc/systemd/system/lanlinkd@.service`, then
+`sudo systemctl daemon-reload && sudo systemctl restart lanlinkd@gaming-night`.
+
+### 7.3 Port conflicts on the data socket
+
+The generated config binds UDP `0.0.0.0:9000` by default. If another service
+already uses that port (Docker's `docker-proxy` commonly does), the daemon
+fails with `Address already in use (os error 98)`. Check with:
+
+```bash
+sudo ss -lnp | grep 9000
+```
+
+If it is taken, edit `/etc/lanlink/<name>.toml` and change the `bind` port:
+
+```toml
+[network]
+bind = "0.0.0.0:19000"
+```
+
+Then `sudo systemctl restart lanlinkd@<name>`. Any high UDP port works — peers
+discover each other via the coordinator and STUN, so the exact port does not
+need to be coordinated between machines.
+
+### 7.4 Frontends need the coordinator URL explicitly
+
+Desktop/TUI/Web/ctl frontends do **not** auto-discover the daemon's configured
+coordinator and default to `http://localhost:8080`. Join/create actions from a
+frontend will fail with `error sending request for url
+(http://localhost:8080/...)` unless you pass the flag:
+
+```bash
+lanlink-desktop --coordinator https://coord.example.com
+lanlink-tui     --coordinator https://coord.example.com
+lanlink-web     --coordinator https://coord.example.com
+lanlinkctl      --coordinator https://coord.example.com status
+```
+
+### 7.5 Verify the client
+
+```bash
+sudo systemctl status lanlinkd@gaming-night --no-pager
+sudo journalctl -u lanlinkd@gaming-night -n 30 --no-pager
+ip addr show lanlink0     # virtual NIC with a 26.x.x.x address
+```
+
+A successful join logs `joined network via coordinator ... assigned_ip=26.x.y.z`
+followed by `created Linux TAP device name=lanlink0`.
 
 ---
 
@@ -376,3 +465,24 @@ so no client changes are required.
 
 - **Monitoring**: the coordinator's telemetry endpoint can be scraped for active
   networks and peer counts (see `docs/api.md`).
+
+---
+
+## 12. Known limitations
+
+These are current code limitations discovered in real deployments; all are
+candidate fixes in the repo:
+
+- **Relay addresses are IP-only.** The coordinator's `--relay-server` /
+  `--tcp-relay-server` flags parse as `SocketAddr`, so hostnames are rejected.
+  Use the VPS public IP; if the IP ever changes, update the flags and restart
+  the coordinator.
+- **Default STUN servers fail to resolve.** `lanlinkd` logs
+  `failed to parse default STUN server server="stun.l.google.com:19302"` for
+  the same `SocketAddr` reason. Until hostnames are supported, NAT hole
+  punching is effectively disabled and peers fall back to the relay. The relay
+  path works but adds latency; configure STUN servers by IP in the daemon
+  config (`[network] stun_servers`) to restore direct connections.
+- **Frontends default to `http://localhost:8080`.** GUI/TUI/Web/ctl do not yet
+  read the coordinator URL from the running daemon; always pass
+  `--coordinator` (see §7.4).

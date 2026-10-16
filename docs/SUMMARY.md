@@ -2,6 +2,7 @@
 
 - [Introduction](./intro.md)
 - [Installation Guide](./install.md)
+- [Coordinator Deployment Guide](./deployment.md)
 - [Wire Protocol & Control API](./protocol.md)
 - [Coordinator REST API](./api.md)
 - [Operator Runbooks](./ops.md)

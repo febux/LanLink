@@ -91,6 +91,7 @@ lanlink/
 ├── tests/                 # netns-based integration tests
 ├── dist/                  # systemd / Windows service / launchd / packaging files
 ├── docs/                  # public documentation site (Markdown + static HTML builder)
+│                          #   see docs/deployment.md for VPS coordinator deployment
 ├── PLAN.md                # detailed research analysis and build plan
 └── README.md              # this file
 ```
@@ -106,6 +107,32 @@ lanlink-desktop
 ```
 
 For full install options see [`docs/install.md`](./docs/install.md).
+
+### Self-hosting a coordinator (VPS)
+
+The coordinator is the only component that needs a public address — it
+brokers peer introductions and advertises relay fallback addresses, but never
+sees decrypted traffic. A minimal static-IP VPS with a domain is enough:
+
+```bash
+# on the VPS (see docs/deployment.md for the full guide)
+cargo build --release -p coordinator -p lanlink-relay
+sudo install -m755 target/release/lanlink-coordinator target/release/lanlink-relayd /usr/local/bin/
+```
+
+Systemd units, Caddy TLS setup, client bootstrap (including the
+`ReadWritePaths=/var/lib/lanlink` unit requirement, the default bind-port
+conflict workaround, and frontend `--coordinator` flags), backups, sizing,
+and known limitations are covered in **[`docs/deployment.md`](./docs/deployment.md)**.
+
+Clients then join with a single URL:
+
+```bash
+LANLINK_PASSWORD='hunter2' sudo -E lanlinkd service up gaming-night \
+  --coordinator https://coord.example.com
+lanlink-desktop --coordinator https://coord.example.com
+```
+
 
 ### Windows — experimental
 
