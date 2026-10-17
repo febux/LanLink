@@ -22,3 +22,4 @@ dist/rpm/rpmbuild/
 .opencode/
 .qwen/
 .zcode/
+.codegraph/
