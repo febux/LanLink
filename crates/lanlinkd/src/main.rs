@@ -533,6 +533,7 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
                 enabled: true,
                 shared_subnet: shared_subnet.clone(),
                 virtual_ip: resp.assigned_ip.0,
+                virtual_subnet: lanlink_gateway::subnet_cidr(resp.assigned_ip.0, netmask),
                 interface: tap_name.clone(),
                 phys_interface,
             },

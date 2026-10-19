@@ -28,10 +28,22 @@ pub struct GatewayConfig {
     pub shared_subnet: String,
     /// This node's virtual IP inside the LanLink network.
     pub virtual_ip: Ipv4Addr,
+    /// CIDR of the virtual subnet (e.g. "26.1.2.0/24"). Used by the Windows
+    /// NAT (WinNAT translates this prefix onto the physical network).
+    pub virtual_subnet: String,
     /// Virtual TAP interface name.
     pub interface: String,
     /// Physical interface used to reach the shared subnet.
     pub phys_interface: String,
+}
+
+/// Compute the CIDR notation for `ip` under `netmask` (e.g. "26.1.2.0/24").
+pub fn subnet_cidr(ip: Ipv4Addr, netmask: Ipv4Addr) -> String {
+    let ip = u32::from(ip);
+    let mask = u32::from(netmask);
+    let prefix = mask.count_ones() as u8;
+    let net = Ipv4Addr::from(ip & mask);
+    format!("{net}/{prefix}")
 }
 
 /// State maintained while gateway mode is active.
@@ -89,7 +101,32 @@ impl GatewayManager {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    /// Enable forwarding and install the NAT rule on Windows: IP forwarding is
+    /// enabled per-interface (`Set-NetIPInterface`) and WinNAT masquerades the
+    /// virtual subnet onto the physical network (`New-NetNat`). Idempotent.
+    #[cfg(target_os = "windows")]
+    pub async fn enable(&self) -> Result<(), GatewayError> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+        let script = windows::build_enable_script(&self.config);
+        windows::run_powershell(&script).await?;
+        tracing::info!(
+            subnet = %self.config.shared_subnet,
+            phys = %self.config.phys_interface,
+            "gateway mode enabled"
+        );
+        Ok(())
+    }
+
+    /// Remove the WinNAT instance and disable forwarding on the interface.
+    #[cfg(target_os = "windows")]
+    pub async fn disable(&self) -> Result<(), GatewayError> {
+        let script = windows::build_disable_script(&self.config.interface);
+        windows::run_powershell(&script).await
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     pub async fn enable(&self) -> Result<(), GatewayError> {
         if self.config.enabled {
             Err(GatewayError::Unsupported)
@@ -98,7 +135,7 @@ impl GatewayManager {
         }
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     pub async fn disable(&self) -> Result<(), GatewayError> {
         Ok(())
     }
@@ -319,7 +356,11 @@ impl RouteManager {
             if let Err(e) = del_route(subnet).await {
                 tracing::warn!(%subnet, error = %e, "failed to remove stale route");
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "windows")]
+            if let Err(e) = windows::remove_route(&self.interface, subnet).await {
+                tracing::warn!(%subnet, error = %e, "failed to remove stale route");
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             let _ = subnet;
         }
 
@@ -328,7 +369,11 @@ impl RouteManager {
             if let Err(e) = add_or_replace_route(subnet, *via, &self.interface).await {
                 tracing::warn!(%subnet, %via, error = %e, "failed to install route");
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "windows")]
+            if let Err(e) = windows::add_or_replace_route(&self.interface, subnet, *via).await {
+                tracing::warn!(%subnet, %via, error = %e, "failed to install route");
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             let _ = (via, subnet);
         }
 
@@ -336,10 +381,11 @@ impl RouteManager {
         Ok(())
     }
 
-    /// Remove routes left behind by a previous (crashed) run of the daemon:
-    /// every route on the interface that was not installed by the kernel
-    /// (i.e. lacks `proto kernel` / `scope link`). Call once at startup,
-    /// before the first `sync_routes`.
+    /// Remove routes left behind by a previous (crashed) run of the daemon.
+    /// On Linux: every route on the interface that was not installed by the
+    /// kernel (i.e. lacks `proto kernel` / `scope link`). On Windows: every
+    /// manually added (`NetMgmt`) IPv4 route on the interface. Call once at
+    /// startup, before the first `sync_routes`.
     pub async fn flush_stale(&self) -> Result<(), GatewayError> {
         #[cfg(target_os = "linux")]
         {
@@ -360,7 +406,12 @@ impl RouteManager {
                 }
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            let script = windows::build_flush_stale_script(&self.interface);
+            windows::run_powershell(&script).await?;
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {}
         Ok(())
     }
@@ -435,6 +486,128 @@ pub fn gateway_routes(peers: &[lanlink_proto::PeerInfo]) -> Vec<(Ipv4Addr, Strin
         .collect()
 }
 
+/// Windows implementation of gateway mode.
+///
+/// - Forwarding: `Set-NetIPInterface -Forwarding Enabled` on the Wintun
+///   interface (per-interface, like `net.ipv4.ip_forward` but scoped).
+/// - NAT: WinNAT (`New-NetNat`) masquerades the virtual subnet onto the
+///   physical network, mirroring the Linux nftables MASQUERADE rule. WinNAT
+///   allows one instance per system; we name it deterministically and replace
+///   it on every enable so re-application is idempotent.
+/// - Peer routes: `New-NetRoute`/`Remove-NetRoute` scoped to the interface.
+///   Routes added this way carry `Protocol = NetMgmt`, which is what
+///   `build_flush_stale_script` keys on.
+#[cfg(any(target_os = "windows", test))]
+pub mod windows {
+    use super::GatewayConfig;
+    #[cfg(target_os = "windows")]
+    use super::GatewayError;
+    use std::net::Ipv4Addr;
+
+    /// Deterministic WinNAT instance name.
+    pub const NAT_NAME: &str = "LanLinkGateway";
+
+    /// Escape a value for use inside a PowerShell single-quoted string.
+    fn ps_quote(value: &str) -> String {
+        value.replace('\'', "''")
+    }
+
+    /// Build the PowerShell script that enables gateway mode.
+    pub fn build_enable_script(config: &GatewayConfig) -> String {
+        let iface = ps_quote(&config.interface);
+        let prefix = ps_quote(&config.virtual_subnet);
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             Set-NetIPInterface -InterfaceAlias '{iface}' -Forwarding Enabled\n\
+             Get-NetNat -Name '{NAT_NAME}' -ErrorAction SilentlyContinue | Remove-NetNat -Confirm:$false\n\
+             New-NetNat -Name '{NAT_NAME}' -InternalIPInterfaceAddressPrefix '{prefix}'\n"
+        )
+    }
+
+    /// Build the PowerShell script that disables gateway mode.
+    pub fn build_disable_script(interface: &str) -> String {
+        let iface = ps_quote(interface);
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             Get-NetNat -Name '{NAT_NAME}' -ErrorAction SilentlyContinue | Remove-NetNat -Confirm:$false\n\
+             Set-NetIPInterface -InterfaceAlias '{iface}' -Forwarding Disabled\n"
+        )
+    }
+
+    /// Build the PowerShell script that removes all manually added (NetMgmt)
+    /// IPv4 routes on an interface — routes a crashed daemon left behind.
+    pub fn build_flush_stale_script(interface: &str) -> String {
+        let iface = ps_quote(interface);
+        format!(
+            "$ErrorActionPreference = 'SilentlyContinue'\n\
+             Get-NetRoute -InterfaceAlias '{iface}' -AddressFamily IPv4 | \
+             Where-Object {{ $_.Protocol -eq 'NetMgmt' }} | Remove-NetRoute -Confirm:$false\n"
+        )
+    }
+
+    /// Build the PowerShell script that adds (or replaces) one route.
+    pub fn build_route_add_script(interface: &str, subnet: &str, via: Ipv4Addr) -> String {
+        let iface = ps_quote(interface);
+        let subnet = ps_quote(subnet);
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             Remove-NetRoute -DestinationPrefix '{subnet}' -InterfaceAlias '{iface}' -Confirm:$false -ErrorAction SilentlyContinue\n\
+             New-NetRoute -DestinationPrefix '{subnet}' -InterfaceAlias '{iface}' -NextHop '{via}'\n"
+        )
+    }
+
+    /// Build the PowerShell script that removes one route.
+    pub fn build_route_del_script(interface: &str, subnet: &str) -> String {
+        let iface = ps_quote(interface);
+        let subnet = ps_quote(subnet);
+        format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             Remove-NetRoute -DestinationPrefix '{subnet}' -InterfaceAlias '{iface}' -Confirm:$false -ErrorAction SilentlyContinue\n"
+        )
+    }
+
+    /// Run a PowerShell script.
+    #[cfg(target_os = "windows")]
+    pub(crate) async fn run_powershell(script: &str) -> Result<(), GatewayError> {
+        use tokio::process::Command;
+
+        let output = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ])
+            .output()
+            .await
+            .map_err(GatewayError::Command)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GatewayError::CommandRejected(stderr));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) async fn add_or_replace_route(
+        interface: &str,
+        subnet: &str,
+        via: Ipv4Addr,
+    ) -> Result<(), GatewayError> {
+        run_powershell(&build_route_add_script(interface, subnet, via)).await
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) async fn remove_route(
+        interface: &str,
+        subnet: &str,
+    ) -> Result<(), GatewayError> {
+        run_powershell(&build_route_del_script(interface, subnet)).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +624,7 @@ mod tests {
             enabled: true,
             shared_subnet: "192.168.1.0/24".to_string(),
             virtual_ip: "26.0.0.2".parse().unwrap(),
+            virtual_subnet: "26.0.0.0/24".to_string(),
             interface: "lanlink0".to_string(),
             phys_interface: "eth0".to_string(),
         };
@@ -488,6 +662,7 @@ mod tests {
             enabled: true,
             shared_subnet: "192.168.1.0/24".to_string(),
             virtual_ip: "26.0.0.2".parse().unwrap(),
+            virtual_subnet: "26.0.0.0/24".to_string(),
             interface: "lanlink0".to_string(),
             phys_interface: "eth0".to_string(),
         };
@@ -550,5 +725,84 @@ mod tests {
         let output = "fe80::/64 proto kernel metric 256 pref medium\n26.5.0.0/24 via 26.0.0.3 dev lanlink0\n";
         let managed = parse_managed_routes(output);
         assert_eq!(managed, vec!["26.5.0.0/24"]);
+    }
+
+    #[test]
+    fn subnet_cidr_variants() {
+        assert_eq!(
+            subnet_cidr("26.1.2.99".parse().unwrap(), "255.255.255.0".parse().unwrap()),
+            "26.1.2.0/24"
+        );
+        assert_eq!(
+            subnet_cidr("10.0.0.1".parse().unwrap(), "255.0.0.0".parse().unwrap()),
+            "10.0.0.0/8"
+        );
+        assert_eq!(
+            subnet_cidr("192.168.1.5".parse().unwrap(), "255.255.255.255".parse().unwrap()),
+            "192.168.1.5/32"
+        );
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    mod windows_tests {
+        use super::*;
+
+        fn config() -> GatewayConfig {
+            GatewayConfig {
+                enabled: true,
+                shared_subnet: "192.168.1.0/24".to_string(),
+                virtual_ip: "26.0.0.2".parse().unwrap(),
+                virtual_subnet: "26.0.0.0/24".to_string(),
+                interface: "lanlink0".to_string(),
+                phys_interface: "Ethernet".to_string(),
+            }
+        }
+
+        #[test]
+        fn enable_script_enables_forwarding_and_replaces_nat() {
+            let script = windows::build_enable_script(&config());
+            assert!(script.contains("Set-NetIPInterface -InterfaceAlias 'lanlink0' -Forwarding Enabled"));
+            // Idempotent: previous NAT instance removed before re-adding.
+            let nat = windows::NAT_NAME;
+            assert!(script.contains(&format!("Get-NetNat -Name '{nat}' -ErrorAction SilentlyContinue | Remove-NetNat")));
+            assert!(script.contains(&format!(
+                "New-NetNat -Name '{nat}' -InternalIPInterfaceAddressPrefix '26.0.0.0/24'"
+            )));
+        }
+
+        #[test]
+        fn disable_script_removes_nat_and_forwarding() {
+            let script = windows::build_disable_script("lanlink0");
+            assert!(script.contains("Remove-NetNat -Confirm:$false"));
+            assert!(script.contains("Set-NetIPInterface -InterfaceAlias 'lanlink0' -Forwarding Disabled"));
+        }
+
+        #[test]
+        fn flush_stale_script_targets_mgmt_routes_only() {
+            let script = windows::build_flush_stale_script("lanlink0");
+            assert!(script.contains("Get-NetRoute -InterfaceAlias 'lanlink0' -AddressFamily IPv4"));
+            assert!(script.contains("$_.Protocol -eq 'NetMgmt'"));
+            assert!(script.contains("Remove-NetRoute -Confirm:$false"));
+        }
+
+        #[test]
+        fn route_add_script_replaces_then_adds() {
+            let script =
+                windows::build_route_add_script("lanlink0", "192.168.1.0/24", "26.0.0.2".parse().unwrap());
+            assert!(script.contains("Remove-NetRoute -DestinationPrefix '192.168.1.0/24' -InterfaceAlias 'lanlink0'"));
+            assert!(script.contains("New-NetRoute -DestinationPrefix '192.168.1.0/24' -InterfaceAlias 'lanlink0' -NextHop '26.0.0.2'"));
+        }
+
+        #[test]
+        fn route_del_script_removes_route() {
+            let script = windows::build_route_del_script("lanlink0", "192.168.1.0/24");
+            assert!(script.contains("Remove-NetRoute -DestinationPrefix '192.168.1.0/24' -InterfaceAlias 'lanlink0'"));
+        }
+
+        #[test]
+        fn scripts_escape_interface_names() {
+            let script = windows::build_disable_script("my adapt'er");
+            assert!(script.contains("-InterfaceAlias 'my adapt''er'"));
+        }
     }
 }
