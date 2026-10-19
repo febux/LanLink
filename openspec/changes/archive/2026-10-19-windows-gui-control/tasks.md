@@ -33,10 +33,10 @@
 
 - [x] 5.1 Build all Windows binaries with `cargo xwin` (desktop rebuilt with the elevation code; sha256 of the redist staged + pinned-check verified)
 - [x] 5.2 Build the MSI on Linux via Docker fallback — `dist/windows/out/lanlink-0.5.2-x64.msi` (~72 MB incl. redist); decompiled to confirm `IncludeTui/Web/Desktop=1`, GUI components, `Vcruntime` component, AppSearch guard and `RunVCRedist` CA before `InstallServices`; offline `SKIP_VCREDIST=1` variant also builds
-- [ ] 5.3 Verify `Dependencies` no longer reports missing `VCRUNTIME140.dll`
-- [ ] 5.4 On a Windows VM, install the MSI and confirm `lanlink-desktop.exe` opens
-- [ ] 5.5 Confirm the desktop app can create/join a network and that `LanLinkDaemon` starts
-- [ ] 5.6 Confirm `lanlink-tui` and `lanlink-web` can read daemon status on Windows
+- [x] 5.3 Verify `Dependencies` no longer reports missing `VCRUNTIME140.dll`
+- [x] 5.4 On a Windows VM, install the MSI and confirm `lanlink-desktop.exe` opens
+- [x] 5.5 Confirm the desktop app can create/join a network and that `LanLinkDaemon` starts
+- [x] 5.6 Confirm `lanlink-tui` and `lanlink-web` can read daemon status on Windows
 
 ## 6. Documentation
 
@@ -60,7 +60,7 @@
 
 - [x] 9.1 Path-explicit I/O errors in `lanlinkd service up` (Windows and Linux): each `create_dir_all`/`write` must say which path failed and why
 - [x] 9.2 Desktop app pre-creates `C:\ProgramData\LanLink` with a permissive ACL before invoking `service_up`, so the elevated `lanlinkd` child can write even when the parent ProgramData ACL is restrictive
-- [ ] 9.3 Same `service_up` call writes a fallback single-file config if `lanlinkd` fails; the GUI can then retry with `service_start`
+- [x] 9.3 Same `service_up` call writes a fallback single-file config if `lanlinkd` fails; the GUI can then retry with `service_start`
 - [x] 9.4 If the directory/file write still fails, the UI error message must include the exact path and the recommended manual workaround (run `lanlinkd service up` from an elevated PowerShell / check AV/Controlled Folder Access)
 
 ## 10. Windows VM feedback round 4 (move daemon config out of ProgramData)

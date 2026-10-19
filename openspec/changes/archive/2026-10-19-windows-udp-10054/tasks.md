@@ -24,6 +24,6 @@
 
 - [x] 4.1 `cargo check -p lanlinkd` and `cargo check -p lanlink-desktop` pass.
 - [x] 4.2 Existing tests still pass.
-- [ ] 4.3 Windows smoke test: daemon starts, joins a network, and does not
+- [x] 4.3 Windows smoke test: daemon starts, joins a network, and does not
       produce `ERROR UDP recv failed 10054` under normal peer churn or relay
       keepalive traffic.
