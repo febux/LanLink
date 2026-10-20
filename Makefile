@@ -58,8 +58,11 @@ GUI_LAUNCH     := scripts/gui-start.sh
 check: ## Run cargo check on the workspace
 	cargo check --workspace
 
-test: ## Run tests on the workspace
+test: ## Run rootless workspace tests (no e2e/scenarios)
 	cargo test --workspace
+
+integration-test: ## Run the rootless integration_tests crate
+	cargo test -p integration_tests
 
 fmt: ## Format all Rust code
 	cargo fmt --all
@@ -141,6 +144,33 @@ dist: ## Build all distribution packages available on this host
 	$(MAKE) build-appimage || true
 	$(MAKE) build-flatpak || true
 	$(MAKE) build-snap || true
+
+# ---------------------------------------------------------------------------
+# Group: E2E scenario runners
+# ---------------------------------------------------------------------------
+
+.PHONY: e2e-build e2e e2e-join e2e-direct e2e-relay e2e-status e2e-mac-switch e2e-pmtu e2e-gateway e2e-firewall
+
+E2E_BINS := target/release/lanlinkd target/release/lanlinkctl target/release/lanlink-coordinator target/release/lanlink-relayd
+
+e2e-build: ## Build release binaries required by the e2e scenarios
+	cargo build --release -p lanlinkd -p lanlinkctl -p coordinator -p lanlink-relay
+
+$(E2E_BINS): e2e-build
+
+define E2E_RULE
+.PHONY: e2e-$1
+e2e-$1: $(E2E_BINS) ## Run e2e/$1.sh (requires root)
+	./e2e/$1.sh
+endef
+
+$(foreach script,join direct relay status mac-switch pmtu gateway firewall,$(eval $(call E2E_RULE,$(script))))
+
+e2e: ## Run all e2e scenarios (requires root; build first)
+	$(MAKE) e2e-build
+	for s in join direct relay status mac-switch pmtu gateway firewall; do \
+		./e2e/$$s.sh || exit $$?; \
+	done
 
 # ---------------------------------------------------------------------------
 # Group: Publishers
