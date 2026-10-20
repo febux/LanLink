@@ -61,6 +61,7 @@ pub struct Outgoing {
 }
 
 /// Per-peer data-plane encryption state.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum PeerCrypto {
     /// Shared-network PSK mode (backward-compatible fallback).

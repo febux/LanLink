@@ -308,6 +308,7 @@ pub async fn list_peers(
     network_id: i64,
     exclude_node_id: &[u8; 8],
 ) -> anyhow::Result<Vec<lanlink_proto::PeerInfo>> {
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(Vec<u8>, String, String, String, String, String, String, i64, String)> = sqlx::query_as(
         "SELECT node_id, virtual_ip, public_key, direct_candidates, relay_candidates, tcp_candidates, tcp_relay_candidates, is_gateway, shared_subnet FROM members
          WHERE network_id = ? AND node_id != ?",

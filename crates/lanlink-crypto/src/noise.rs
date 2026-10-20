@@ -169,7 +169,7 @@ impl Handshake {
         let finished_after_write = self
             .state
             .as_ref()
-            .map_or(false, |s| s.is_handshake_finished());
+            .is_some_and(|s| s.is_handshake_finished());
 
         if finished_after_write {
             let state = self.state.take().expect("handshake state present");

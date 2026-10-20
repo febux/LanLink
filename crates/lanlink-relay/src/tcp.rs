@@ -111,15 +111,10 @@ async fn handle_client(
 
     // Forward packets from other clients to this connection.
     let forward_task = tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Some(packet) => {
-                    if let Err(e) = write_frame(&mut write_half, &packet).await {
-                        tracing::debug!(%from, error = %e, "TCP relay forward failed");
-                        break;
-                    }
-                }
-                None => break,
+        while let Some(packet) = rx.recv().await {
+            if let Err(e) = write_frame(&mut write_half, &packet).await {
+                tracing::debug!(%from, error = %e, "TCP relay forward failed");
+                break;
             }
         }
     });
@@ -225,15 +220,10 @@ pub mod client {
 
         // Writer task: send outgoing packets to the relay.
         tokio::spawn(async move {
-            loop {
-                match out_rx.recv().await {
-                    Some(packet) => {
-                        if let Err(e) = write_frame(&mut write_half, &packet).await {
-                            tracing::debug!(%addr, error = %e, "TCP relay client write failed");
-                            break;
-                        }
-                    }
-                    None => break,
+            while let Some(packet) = out_rx.recv().await {
+                if let Err(e) = write_frame(&mut write_half, &packet).await {
+                    tracing::debug!(%addr, error = %e, "TCP relay client write failed");
+                    break;
                 }
             }
         });

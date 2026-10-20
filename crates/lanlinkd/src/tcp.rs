@@ -143,15 +143,10 @@ async fn connection_writer(
     addr: SocketAddr,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
-    loop {
-        match rx.recv().await {
-            Some(packet) => {
-                if let Err(e) = write_frame(&mut write_half, &packet).await {
-                    tracing::debug!(%addr, error = %e, "TCP connection write failed");
-                    break;
-                }
-            }
-            None => break,
+    while let Some(packet) = rx.recv().await {
+        if let Err(e) = write_frame(&mut write_half, &packet).await {
+            tracing::debug!(%addr, error = %e, "TCP connection write failed");
+            break;
         }
     }
 }
