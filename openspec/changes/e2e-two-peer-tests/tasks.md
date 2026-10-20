@@ -36,7 +36,7 @@ This change builds on the existing workspace test layout rather than replacing i
 - [x] 3.2 Implement `e2e/lib.sh` logging/report helpers that write per-scenario work directories under `target/e2e/<scenario>.$$/` and produce a markdown report. Verify by running a stub scenario that creates and tears down its work directory.
 - [x] 3.3 Define per-scenario exit-code constants in `e2e/lib.sh` and a `fail_scenario <code> <message>` function that prints the last 20 lines of relevant logs. Verify with a unit test of `fail_scenario` in a throwaway script.
 
-> Group 3 ticket: `t_6c64f4d5`
+> Group 3 ticket: `t_1e3e426f`
 
 ## 4. E2E scenarios
 
@@ -49,7 +49,7 @@ This change builds on the existing workspace test layout rather than replacing i
 - [x] 4.7 Implement `e2e/status.sh`: query each peer's status socket for `{"cmd":"snapshot"}` and assert the returned NDJSON contains the expected peers and path. Verify by running `sudo make e2e-status`.
 - [x] 4.8 Implement `e2e/firewall.sh`: join a public network, apply the default firewall profile, and verify a blocked TCP port is dropped while ICMP echo is allowed. Verify by running `sudo make e2e-firewall`.
 
-> Group 4 ticket: `t_c0c6a3f7`
+> Group 4 ticket: `t_8540bf56`
 >
 > Note: the E2E scenarios are implemented and `bash -n` passes, but the actual
 > `sudo make e2e-*` runs must be performed on the privileged host. This worker
@@ -62,7 +62,7 @@ This change builds on the existing workspace test layout rather than replacing i
 - [ ] 5.3 Create `.github/workflows/e2e.yml` alongside `.github/workflows/diagnostics.yml` and `.github/workflows/release.yml`, with two jobs: an `integration` job running on `ubuntu-24.04` with `make integration-test`, and an `e2e` job documented as requiring a privileged self-hosted runner with a conditional `if: github.repository == '...' && vars.E2E_RUNNER != ''`. The e2e job runs `make e2e`. Verify by running `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/e2e.yml'))"`.
 - [x] 5.4 Add a `docs/testing.md` (or extend `README.md`) describing how to run integration tests and e2e scenarios locally, including the root requirement and how to read logs from `target/e2e/<scenario>.$$/`. Verify by reading the rendered markdown.
 
-> Group 5 ticket: `t_5a0e2c8b`
+> Group 5 ticket: `t_bce1e8a8`
 >
 > Note: 5.3 (`.github/workflows/e2e.yml`) is intentionally left for a follow-up
 > because adding CI workflow files is outside the current apply scope and
