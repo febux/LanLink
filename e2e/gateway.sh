@@ -14,12 +14,11 @@ LAN_NS="e2e_lan_host"
 GW_PEER=1
 
 teardown_lan() {
-    ip netns del "$LAN_NS" 2>/dev/null || true
-    local gw_ns host_veth
+    local gw_ns gw_veth
     gw_ns="$(peer_ns_name $GW_PEER)"
-    host_veth="e2e_gw_lan_host"
-    ip -n "$gw_ns" link del "${host_veth}_gw" 2>/dev/null || true
-    ip link del "$host_veth" 2>/dev/null || true
+    gw_veth="e2e_gw_lan_gw"
+    ip -n "$gw_ns" link del "$gw_veth" 2>/dev/null || true
+    ip netns del "$LAN_NS" 2>/dev/null || true
 }
 
 create_lan() {
@@ -30,10 +29,11 @@ create_lan() {
     gw_veth="e2e_gw_lan_gw"
 
     ip link add "$host_veth" type veth peer name "$gw_veth" netns "$gw_ns"
-    ip -n "$LAN_NS" link set "$host_veth" netns "$LAN_NS"
+    ip link set "$host_veth" netns "$LAN_NS"
     ip -n "$LAN_NS" addr add "${LAN_HOST_IP}/24" dev "$host_veth"
     ip -n "$LAN_NS" link set "$host_veth" up
     ip -n "$LAN_NS" link set lo up
+    ip -n "$LAN_NS" route add default via "192.168.77.1"
 
     ip -n "$gw_ns" addr add "192.168.77.1/24" dev "$gw_veth"
     ip -n "$gw_ns" link set "$gw_veth" up
@@ -74,8 +74,7 @@ ip -n "$ns2" route add "${SHARED_SUBNET}" via "$gw_virt_ip" || true
 
 # Allow forwarding on the gateway peer and enable NAT for the shared subnet.
 gw_ns="$(peer_ns_name $GW_PEER)"
-ip -n "$gw_ns" sysctl -w net.ipv4.ip_forward=1 >/dev/null
-ip -n "$gw_ns" iptables -t nat -A POSTROUTING -s "${SHARED_SUBNET}" -o e2e_gw_lan_gw -j MASQUERADE 2>/dev/null || true
+ip netns exec "$gw_ns" sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
 ip netns exec "$ns2" ping -c 3 -W 2 "$LAN_HOST_IP" > "${E2E_WORK_DIR}/lan_ping.log" 2>&1 || fail_scenario "$E2E_ASSERTION_FAILED" "ping from peer 2 to LAN host failed"
 

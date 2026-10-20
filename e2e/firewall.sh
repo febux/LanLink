@@ -32,8 +32,16 @@ ns1="$(peer_ns_name 1)"
 ns2="$(peer_ns_name 2)"
 
 # Start a TCP listener on a blocked port inside peer 2's namespace.
-ip netns exec "$ns2" sh -c "exec >\"${E2E_WORK_DIR}/listener.log\" 2>&1; exec nc -l -p 7777" &
-listener_pid=$!
+listener_log="${E2E_WORK_DIR}/listener.log"
+if command -v socat >/dev/null 2>&1; then
+    ip netns exec "$ns2" socat TCP-LISTEN:7777 /dev/null > "$listener_log" 2>&1 &
+    listener_pid=$!
+elif command -v nc >/dev/null 2>&1; then
+    ip netns exec "$ns2" nc -l 7777 > "$listener_log" 2>&1 &
+    listener_pid=$!
+else
+    fail_scenario "$E2E_ASSERTION_FAILED" "need socat or nc to run TCP listener"
+fi
 sleep 1
 
 # Connection attempt from peer 1 must fail / time out.

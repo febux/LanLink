@@ -14,7 +14,7 @@ RELEASE_DIR="${REPO_DIR}/target/release"
 # ---- default tunables (overridable by env) ---------------------------------
 E2E_DIR="${E2E_DIR:-${REPO_DIR}/target/e2e}"
 E2E_SCENARIO="${E2E_SCENARIO:-unknown}"
-E2E_WORK_DIR="${E2E_WORK_DIR:-${E2E_DIR}/${E2E_SCENARIO}.\$\$}"
+E2E_WORK_DIR="${E2E_WORK_DIR:-${E2E_DIR}/${E2E_SCENARIO}.$$}"
 E2E_REPORT="${E2E_REPORT:-${E2E_WORK_DIR}/report.md}"
 
 E2E_COORD_PORT="${E2E_COORD_PORT:-18080}"
@@ -175,7 +175,7 @@ teardown_topology() {
 start_scenario() {
     local name="$1"
     E2E_SCENARIO="$name"
-    E2E_WORK_DIR="${E2E_DIR}/${name}.\$\$"
+    E2E_WORK_DIR="${E2E_DIR}/${name}.$$"
     E2E_REPORT="${E2E_WORK_DIR}/report.md"
     make_work_dir
     write_report_header
