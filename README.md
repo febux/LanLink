@@ -4,13 +4,16 @@ A free, peer-to-peer virtual LAN (layer-2 mesh VPN) inspired by Radmin VPN. Buil
 for gaming, remote access, and connecting distributed teams without port
 forwarding or centralized accounts.
 
-**Current status**: Linux is fully functional. Windows and macOS support is
-under active development (Wintun/utun backends are stubbed). This release is
-aimed at Linux users who want a working alternative to Radmin VPN today;
-cross-platform parity is the next milestone.
+**Current status**: Linux is fully functional. Windows support is implemented
+(Wintun backend, MSI service installer, status transport, firewall, and gateway
+parity) but has not yet been validated on real hardware — see
+[`docs/windows-real-machine-checklist.md`](./docs/windows-real-machine-checklist.md).
+macOS is stubbed. This release is aimed at Linux users who want a working
+alternative to Radmin VPN today; the Windows hardware test run is the next
+milestone.
 
-**Stack**: Rust workspace (daemon, CLI, coordinator) + self-hostable Go/Rust relay
-(architecture decision in [`PLAN.md`](./PLAN.md)).
+**Stack**: Rust workspace (daemon, CLI, coordinator, frontends) + self-hostable
+Rust relay (`lanlink-relayd`) (architecture decision in [`PLAN.md`](./PLAN.md)).
 
 ---
 
@@ -30,8 +33,10 @@ Key design points:
   decrypt traffic.
 - **Cross-platform foundation**: Linux TAP is production-ready; Windows uses the
   bundled Wintun driver (no separate install required, layer-3 IP only); macOS
-  utun is stubbed. See the `windows-parity` change under `openspec/changes/`
-  for the Windows testing checklist and remaining protocol work.
+  utun is stubbed. The Windows testing checklist lives in
+  [`docs/windows-real-machine-checklist.md`](./docs/windows-real-machine-checklist.md)
+  (automated checks: `scripts/windows-preflight.ps1`); the shipped change record
+  is archived under `openspec/changes/archive/2026-10-19-windows-parity/`.
 
 ## Project status
 
@@ -43,27 +48,35 @@ Implemented so far:
 - **Coordinator REST API** — create/join/list networks, public directory, opt-in telemetry.
 - **NAT traversal** — STUN-based UDP hole punching with fallback to a custom content-blind
   UDP relay (`lanlink-relayd`).
-- **Gateway + firewall** — Linux-only gateway mode (proxy-ARP, NAT, route push) and a
-  public/gaming-network inbound firewall profile (`nftables`).
+- **Gateway + firewall** — gateway mode (proxy-ARP, NAT, route push) and a
+  public/gaming-network inbound firewall profile on Linux (`nftables`) and,
+  as of the windows-parity change, on Windows (WinNAT gateway, WFP-backed
+  firewall rules; see the `windows-gateway` / `windows-firewall` specs under
+  `openspec/specs/`).
+- **TCP fallback + Noise identity** — TCP direct/relay fallback transport and
+  per-device Ed25519 identities with pairwise Noise_XX sessions (shipped
+  changes archived under `openspec/changes/archive/`: `2026-10-15-tcp-fallback`,
+  `2026-10-15-noise-identity`).
 - **Frontends** — terminal UI (`lanlink-tui`), browser WebUI (`lanlink-web`), Tauri
   desktop shell (`lanlink-desktop`), and unified launcher (`lanlink-gui`).
-- **Packaging** — systemd unit, deb/rpm/AUR helpers, and WiX/MSI scaffolding
+- **Packaging** — systemd unit, deb/rpm/AUR helpers, and WiX/MSI installer
   (see [`dist/README.md`](./dist/README.md)).
 
 **Not yet ready**:
 
-- **Windows Wintun backend** — implemented using `wintun-bindings` with the
-  bundled `wintun.dll`. No separate driver install is required; carries layer-3
-  IP packets only on Windows. This is new and needs real-machine testing.
+- **Windows real-machine validation** — the Wintun backend, MSI service
+  installer, TCP-loopback status transport, firewall, and gateway mode are
+  implemented and cross-compile, but the two-PC hardware run is still pending
+  ([`docs/windows-real-machine-checklist.md`](./docs/windows-real-machine-checklist.md);
+  automated checks in `scripts/windows-preflight.ps1`). Wintun is a layer-3
+  (IP packet) interface, so ARP and raw Ethernet multicast discovery are not
+  available on Windows yet.
 - **macOS utun backend** — stubbed.
-- **TCP/Teredo fallback** — TCP direct and relay fallback are implemented
-  (see `openspec/changes/archive/2026-10-15-tcp-fallback/`); the Teredo/IPv6
-  phase is deferred to the `windows-parity` change.
-- **Per-device identity keys** — Noise/Ed25519 identity and pairwise sessions
-  are implemented (see `openspec/changes/archive/2026-10-15-noise-identity/`).
+- **Teredo/IPv6 discovery** — design only
+  ([`docs/teredo-ipv6-design.md`](./docs/teredo-ipv6-design.md)); no
+  implementation yet.
 
-Next up: real-machine Windows testing (see the `windows-parity` change under
-`openspec/changes/`).
+Next up: run the Windows real-machine checklist on hardware.
 
 See [`PLAN.md`](./PLAN.md) for the full research analysis, architecture, roadmap, and
 cross-platform plan.
@@ -91,7 +104,12 @@ lanlink/
 ├── tests/                 # netns-based integration tests
 ├── dist/                  # systemd / Windows service / launchd / packaging files
 ├── docs/                  # public documentation site (Markdown + static HTML builder)
-│                          #   see docs/deployment.md for VPS coordinator deployment
+│                          #   docs/deployment.md — VPS coordinator deployment
+│                          #   docs/windows-real-machine-checklist.md — Windows hardware tests
+│                          #   docs/teredo-ipv6-design.md — deferred IPv6 NAT-traversal design
+├── openspec/              # spec-driven change log: changes/ (active) + specs/ (current
+│                          #   capability specs, e.g. windows-firewall, windows-gateway);
+│                          #   changes/archive/ holds shipped changes
 ├── PLAN.md                # detailed research analysis and build plan
 └── README.md              # this file
 ```
@@ -160,8 +178,16 @@ are not available yet.
    ```powershell
    cargo run -p lanlink-web
    ```
+5. Optional: run the automated preflight (adapter state, status transport,
+   firewall self-test, gateway route/NAT checks):
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\windows-preflight.ps1
+   ```
 
-The Windows backend is brand-new and has not yet been tested on real hardware.
+The Windows port (Wintun backend, MSI service installer, TCP-loopback status
+transport, firewall, and gateway mode) is implemented but has not yet been
+exercised on real hardware — see
+[`docs/windows-real-machine-checklist.md`](./docs/windows-real-machine-checklist.md).
 Feedback and bug reports are welcome.
 
 ## Quick start (development)
@@ -333,21 +359,22 @@ make test
 | M5 | Relay server (`lanlink-relayd`) | ✅ Done |
 | M6 | Gateway mode + gaming-network firewall (Linux) | ✅ Done |
 | M7 | Linux packaging + service management | ✅ Done |
-| M8 | Windows TAP-Windows6 backend | 🚧 Implemented, needs testing |
-| M9 | TCP/Teredo fallback | 🚧 Protocol + schema ready, transport pending |
-| M10 | Per-device Noise/Ed25519 identity keys | 🚧 Storage ready, handshake pending |
+| M8 | Windows port: Wintun backend, MSI service, status transport | 🚧 Implemented, real-machine testing pending |
+| M8a | Windows firewall + gateway parity (WFP/WinNAT) | 🚧 Implemented, real-machine testing pending |
+| M9 | TCP/Teredo fallback | 🚧 TCP direct+relay done; Teredo design only |
+| M10 | Per-device Noise/Ed25519 identity keys | ✅ Done (Noise_XX pairwise sessions; PSK fallback kept) |
 | M11 | macOS utun backend + cross-platform CI | ⏳ Planned |
 
 Full details and acceptance criteria are in [`PLAN.md`](./PLAN.md) §9.
 
 ## Security model
 
-- Traffic is end-to-end encrypted with ChaCha20-Poly1305 (or AES-256-GCM) and authenticated
-  per peer using a network-wide PSK derived from the network password.
+- Traffic is end-to-end encrypted with ChaCha20-Poly1305 (or AES-256-GCM).
+  Peers that advertise an Ed25519 public key establish pairwise Noise_XX
+  sessions (`Noise_XX_25519_ChaChaPoly_BLAKE2s`), giving identity-based
+  authentication and forward secrecy; otherwise the frame is encrypted with a
+  network-wide PSK derived from the network password (compatibility fallback).
 - The network password is stretched with Argon2id; the coordinator never sees the password.
-- **Current limitation**: all peers in a network share the same PSK. Pairwise sessions will
-  migrate to the Noise protocol framework with per-device Ed25519/X25519 identity keys for
-  identity-based authentication and forward secrecy.
 - The daemon runs with elevated privileges only for virtual-NIC management; on Linux it can
   be constrained to `CAP_NET_ADMIN` / `CAP_NET_RAW`.
 
