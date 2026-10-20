@@ -1,0 +1,28 @@
+[package]
+name = "integration_tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+socket2 = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+
+coordinator = { path = "../crates/coordinator" }
+lanlink-crypto = { path = "../crates/lanlink-crypto" }
+lanlink-proto = { path = "../crates/lanlink-proto" }
+lanlink-punch = { path = "../crates/lanlink-punch" }
+lanlink-relay = { path = "../crates/lanlink-relay" }
+lanlink-switch = { path = "../crates/lanlink-switch" }
