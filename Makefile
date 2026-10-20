@@ -161,6 +161,10 @@ $(E2E_BINS): e2e-build
 define E2E_RULE
 .PHONY: e2e-$1
 e2e-$1: $(E2E_BINS) ## Run e2e/$1.sh (requires root)
+	@if [ `id -u` -ne 0 ]; then \
+		echo "e2e/$1.sh requires root (netns/TAP require CAP_NET_ADMIN). Run with sudo." >&2; \
+		exit 1; \
+	fi
 	./e2e/$1.sh
 endef
 
@@ -168,6 +172,10 @@ $(foreach script,join direct relay status mac-switch pmtu gateway firewall disco
 
 e2e: ## Run all e2e scenarios (requires root; build first)
 	$(MAKE) e2e-build
+	@if [ `id -u` -ne 0 ]; then \
+		echo "e2e scenarios require root (netns/TAP require CAP_NET_ADMIN). Run with sudo." >&2; \
+		exit 1; \
+	fi
 	for s in join direct relay status mac-switch pmtu gateway firewall disconnect; do \
 		./e2e/$$s.sh || exit $$?; \
 	done

@@ -59,14 +59,13 @@ This change builds on the existing workspace test layout rather than replacing i
 
 - [x] 5.1 Add Makefile targets `e2e`, `e2e-join`, `e2e-direct`, `e2e-relay`, `e2e-mac-switch`, `e2e-pmtu`, `e2e-gateway`, `e2e-status`, `e2e-firewall`, and `integration-test` in the existing `Makefile` (group them after the `test` target). Each `e2e-*` target must check for root, build release binaries first, and forward a distinct exit code. Verify by running `make -n e2e-join` and inspecting the planned commands, and `make help` for the new target descriptions.
 - [x] 5.2 Update the workspace `test` target help string in the `Makefile` to clarify that it runs rootless tests only. Verify with `make help`.
-- [ ] 5.3 Create `.github/workflows/e2e.yml` alongside `.github/workflows/diagnostics.yml` and `.github/workflows/release.yml`, with two jobs: an `integration` job running on `ubuntu-24.04` with `make integration-test`, and an `e2e` job documented as requiring a privileged self-hosted runner with a conditional `if: github.repository == '...' && vars.E2E_RUNNER != ''`. The e2e job runs `make e2e`. Verify by running `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/e2e.yml'))"`.
+- [x] 5.3 Create `.github/workflows/e2e.yml` alongside `.github/workflows/diagnostics.yml` and `.github/workflows/release.yml`, with two jobs: an `integration` job running on `ubuntu-24.04` with `make integration-test`, and an `e2e` job documented as requiring a privileged self-hosted runner with a conditional `if: github.repository == '...' && vars.E2E_RUNNER != ''`. The e2e job runs `make e2e`. Verify by running `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/e2e.yml'))"`.
 - [x] 5.4 Add a `docs/testing.md` (or extend `README.md`) describing how to run integration tests and e2e scenarios locally, including the root requirement and how to read logs from `target/e2e/<scenario>.$$/`. Verify by reading the rendered markdown.
 
 > Group 5 ticket: `t_bce1e8a8`
 >
-> Note: 5.3 (`.github/workflows/e2e.yml`) is intentionally left for a follow-up
-> because adding CI workflow files is outside the current apply scope and
-> should be reviewed separately.
+> Note: actual `sudo make e2e` runtime verification is left for a privileged host;
+> this worker is not root.
 
 ## 6. Final verification
 
