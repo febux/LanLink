@@ -1026,6 +1026,49 @@ configure_relay() {
 }
 
 # ---------------------------------------------------------------------------
+# Peer status socket helpers
+# ---------------------------------------------------------------------------
+
+# Discover the daemon status socket for a peer. The socket is named by
+# network_id (e.g., /run/lanlink/lanlinkd-1.sock), not by network name.
+peer_status_socket() {
+  local config_path="$1"
+  local network_id=""
+
+  if [ -f "${config_path}" ]; then
+    network_id="$(sed -n 's/^[[:space:]]*network_id[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${config_path}" | head -n1)"
+  fi
+
+  if [ -n "${network_id}" ] && [ -S "/run/lanlink/lanlinkd-${network_id}.sock" ]; then
+    printf '/run/lanlink/lanlinkd-%s.sock\n' "${network_id}"
+    return 0
+  fi
+
+  # Fallback: any daemon status socket in the run directory.
+  find /run/lanlink -maxdepth 1 -type s -name 'lanlinkd-*.sock' 2>/dev/null | head -n1
+}
+
+# Query the daemon status socket and return 0 if it replies with a snapshot
+# that indicates the network is joined (assigned_ip is present).
+peer_status_online() {
+  local socket_path="$1"
+  local payload='{"cmd":"snapshot"}'
+  local reply=""
+
+  if [ ! -S "${socket_path}" ]; then
+    return 1
+  fi
+
+  if command -v socat >/dev/null 2>&1; then
+    reply="$(printf '%s\n' "${payload}" | socat - UNIX-CONNECT:"${socket_path}" 2>/dev/null || true)"
+  elif command -v nc >/dev/null 2>&1; then
+    reply="$(printf '%s\n' "${payload}" | nc -U "${socket_path}" 2>/dev/null || true)"
+  fi
+
+  [ -n "${reply}" ] && printf '%s\n' "${reply}" | grep -q '"assigned_ip"'
+}
+
+# ---------------------------------------------------------------------------
 # Peer role
 # ---------------------------------------------------------------------------
 
@@ -1081,11 +1124,9 @@ configure_peer() {
     *) warn "unknown GUI selector: ${GUI}" ;;
   esac
 
-  local status_socket="/run/lanlink/lanlinkd-${NETWORK}.sock"
-
   if [ "${DRY_RUN}" = 1 ]; then
-    printf 'DRY_RUN: would run lanlinkd service up %s --coordinator %s --status-socket %s\n' \
-      "${NETWORK}" "${COORD_URL}" "${status_socket}"
+    printf 'DRY_RUN: would run lanlinkd service up %s --coordinator %s\n' \
+      "${NETWORK}" "${COORD_URL}"
     printf 'DRY_RUN: would write secret %s\n' "${secret_path}"
     return 0
   fi
@@ -1099,15 +1140,17 @@ configure_peer() {
   fi
 
   LANLINK_PASSWORD="${PASSWORD}" run lanlinkd service up "${NETWORK}" \
-    --coordinator "${COORD_URL}" \
-    --status-socket "${status_socket}"
+    --coordinator "${COORD_URL}"
 
-  # Verify the daemon is reachable through its status socket.
+  # The daemon names the status socket by network_id, not network name.
+  # Discover the real socket path and verify the daemon is reachable.
+  local status_socket=""
   local deadline tries
   deadline=$(($(date +%s) + 30))
   tries=0
   while [ "$(date +%s)" -lt "${deadline}" ]; do
-    if [ -S "${status_socket}" ]; then
+    status_socket="$(peer_status_socket "${config_path}")"
+    if [ -n "${status_socket}" ] && [ -S "${status_socket}" ]; then
       log "peer status socket ready: ${status_socket}"
       break
     fi
@@ -1115,8 +1158,14 @@ configure_peer() {
     tries=$((tries + 1))
   done
 
-  if [ ! -S "${status_socket}" ]; then
-    warn "peer status socket did not appear at ${status_socket}"
+  if [ -n "${status_socket}" ] && [ -S "${status_socket}" ]; then
+    if peer_status_online "${status_socket}"; then
+      log "peer reports online status"
+    else
+      warn "peer status socket did not return an online snapshot"
+    fi
+  else
+    warn "peer status socket did not appear"
   fi
 
   cat <<EOF
@@ -1126,7 +1175,7 @@ Peer service is ready.
   Config:  ${config_path}
   Secret:  ${secret_path}
   Unit:    lanlinkd@${NETWORK}.service
-  Status:  ${status_socket}
+  Status:  ${status_socket:-/run/lanlink/lanlinkd-<network_id>.sock}
 
 Management commands:
   lanlinkd service status

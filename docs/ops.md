@@ -2,6 +2,16 @@
 
 ## Installation
 
+The recommended way to install LanLink on Linux is the wizard:
+
+```bash
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash
+```
+
+See [`install.md`](./install.md) for role-based examples, environment
+variables, and non-interactive usage. The manual package instructions below are
+for fallback or unusual distros.
+
 ### Linux (deb/rpm/AUR)
 
 Packages install `lanlinkd`, `lanlinkctl`, and `lanlink-coordinator` into

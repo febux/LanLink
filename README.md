@@ -116,32 +116,50 @@ lanlink/
 
 ## Quick start (install)
 
-### Linux — ready today
+### Linux — recommended wizard install
+
+The install wizard (`scripts/install.sh`, published as `lanlink-install.sh` in
+GitHub Releases) is the fastest way to get a working LanLink node. It detects
+the distro, installs the right package, verifies checksums, and configures the
+role you want.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/febux/LanLink/master/dist/install.sh | sh
-LANLINK_PASSWORD=hunter2 sudo -E lanlinkd service up gaming-night
-lanlink-desktop
+# Default interactive install (prompts for role and details)
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash
 ```
 
-For full install options see [`docs/install.md`](./docs/install.md).
+Typical role commands:
+
+```bash
+# Join a network as a peer (non-interactive)
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role peer \
+    --coord-url https://coord.example.com \
+    --network gaming-night \
+    --password 's3cret' \
+    --yes
+
+# Self-host the coordinator (and relay) on a VPS
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role coordinator --with-relay --yes
+```
+
+For the complete option list and environment variables, see
+[`docs/install.md`](./docs/install.md).
 
 ### Self-hosting a coordinator (VPS)
 
 The coordinator is the only component that needs a public address — it
 brokers peer introductions and advertises relay fallback addresses, but never
-sees decrypted traffic. A minimal static-IP VPS with a domain is enough:
+sees decrypted traffic. The wizard can install it in one command:
 
 ```bash
-# on the VPS (see docs/deployment.md for the full guide)
-cargo build --release -p coordinator -p lanlink-relay
-sudo install -m755 target/release/lanlink-coordinator target/release/lanlink-relayd /usr/local/bin/
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role coordinator --with-relay --yes
 ```
 
-Systemd units, Caddy TLS setup, client bootstrap (including the
-`ReadWritePaths=/var/lib/lanlink` unit requirement, the default bind-port
-conflict workaround, and frontend `--coordinator` flags), backups, sizing,
-and known limitations are covered in **[`docs/deployment.md`](./docs/deployment.md)**.
+For a full VPS guide with Caddy TLS, firewall, backups, and sizing, see
+[`docs/deployment.md`](./docs/deployment.md).
 
 Clients then join with a single URL:
 
@@ -150,6 +168,12 @@ LANLINK_PASSWORD='hunter2' sudo -E lanlinkd service up gaming-night \
   --coordinator https://coord.example.com
 lanlink-desktop --coordinator https://coord.example.com
 ```
+
+### Advanced / manual install (fallback)
+
+If the wizard is not suitable, install the package manually and use
+`lanlinkd service` directly. See [`docs/install.md`](./docs/install.md) §Fallback
+and [`dist/README.md`](./dist/README.md).
 
 
 ### Windows — experimental

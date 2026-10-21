@@ -1,24 +1,31 @@
 # Installation Guide
 
-This guide shows how to install LanLink on Linux and Windows with **one command**,
-picking the front-end you want: native desktop app, browser WebUI, or terminal UI.
+The fastest way to install LanLink on Linux is the wizard (`scripts/install.sh`,
+published as `lanlink-install.sh` in GitHub Releases). It detects your
+package manager, downloads the matching artifact, verifies checksums, and
+configures the requested role in one command.
 
 For maintainers, see [`dist/publish-release.sh`](../dist/publish-release.sh) or
 `make dist-publish` to build and publish all distribution packages to GitHub
 Releases in one command.
 
-## What you get
+## What the wizard installs
 
-Every install method below gives you the same core binaries:
+Regardless of role, the wizard installs the core LanLink binaries and systemd
+units:
 
-- `lanlinkd` — the daemon that creates the virtual LAN interface
-- `lanlinkctl` — command-line control tool
-- `lanlink-coordinator` — self-hosted membership server
-- `lanlink-relayd` — UDP relay fallback server
-- systemd units: `lanlinkd@.service`, `lanlink-coordinator.service`,
-  `lanlink-relayd.service`
+- `/usr/bin/lanlinkd` — virtual-LAN daemon
+- `/usr/bin/lanlinkctl` — command-line control tool
+- `/usr/bin/lanlink-coordinator` — self-hosted membership/signaling server
+- `/usr/bin/lanlink-relayd` — content-blind UDP relay fallback
+- `/etc/lanlink/` — per-network TOML configs and password secrets
+- `/var/lib/lanlink/` — runtime data (coordinator SQLite DB, identity keys)
+- systemd units:
+  - `lanlinkd@.service` — one daemon instance per `/etc/lanlink/<name>.toml`
+  - `lanlink-coordinator.service` — coordinator role
+  - `lanlink-relayd.service` — relay role
 
-You can optionally include one or more GUI front-ends:
+Optional GUI front-ends can be included for the peer role:
 
 | Front-end | Binary | Description |
 |---|---|---|
@@ -27,122 +34,261 @@ You can optionally include one or more GUI front-ends:
 | Terminal UI | `lanlink-tui` | Runs in any terminal |
 | Unified launcher | `lanlink-gui` | One binary that can start TUI/Web/Desktop |
 
-## One-command install
+## Recommended one-line install
 
-### Linux
-
-```bash
-# Native desktop app (default)
-curl -fsSL https://raw.githubusercontent.com/febux/LanLink/master/dist/install.sh | sh
-
-# Terminal UI
-curl -fsSL https://raw.githubusercontent.com/febux/LanLink/master/dist/install.sh | sh -s -- --gui tui
-
-# Browser WebUI
-curl -fsSL https://raw.githubusercontent.com/febux/LanLink/master/dist/install.sh | sh -s -- --gui web
-
-# Pick a different package format
-curl -fsSL ... | sh -s -- --pkg deb       # Debian/Ubuntu (default on apt systems)
-curl -fsSL ... | sh -s -- --pkg rpm       # Fedora/RHEL
-curl -fsSL ... | sh -s -- --pkg tarball  # Any distro, no package manager
-curl -fsSL ... | sh -s -- --pkg appimage  # Single-file desktop app
-curl -fsSL ... | sh -s -- --pkg flatpak   # Flatpak bundle
-curl -fsSL ... | sh -s -- --pkg snap      # Snap package
-```
-
-## Role-based install wizard
-
-`scripts/install.sh` (also published to GitHub Releases as `lanlink-install.sh`)
-supports `--role coordinator|peer|relay` for a single-command deployment of an
-entire LanLink node. It detects the distro, downloads or uses the matching
-package, installs systemd units, configures secrets, and starts the service.
-
-### coordinator
+The wizard is safe to pipe from GitHub Releases (`set -euo pipefail`, no `eval`
+of remote content, optional `SHA256SUMS` verification). Replace `v0.6.1`
+with the latest release if you prefer a pinned version.
 
 ```bash
-curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash -s -- --role coordinator --yes
+# Quick default (downloads, installs core, prompts for role interactively)
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash
 ```
 
-Options:
-
-| Option | Default | Description |
-|---|---|---|
-| `--listen` | `0.0.0.0:8080` | REST API listen address |
-| `--relay-server` | none | `--relay-server` passed to `lanlink-coordinator` |
-| `--data-dir` | `/var/lib/lanlink` | SQLite database directory |
-
-The wizard enables `lanlink-coordinator.service` and prints the peer join
-command.
-
-### relay
+For a fully non-interactive install, set the role and role-specific options via
+environment variables and add `--yes`:
 
 ```bash
-curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash -s -- --role relay --yes
+# Join a network as a peer, non-interactive
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  LANLINK_ROLE=peer \
+  LANLINK_COORD_URL=https://coord.example.com \
+  LANLINK_NETWORK=gaming-night \
+  LANLINK_PASSWORD='s3cret' \
+  bash -s -- --yes
 ```
 
-Options:
+> Environment variables win over CLI flags, so the same command works both
+> interactively and in CI playbooks.
 
-| Option | Default | Description |
-|---|---|---|
-| `--listen` | `0.0.0.0:3478` | UDP relay listen address |
+## Wizard options and environment variables
 
-### peer
+Every CLI flag below has an equivalent environment variable. When both are set,
+the environment variable takes precedence.
+
+| CLI flag | Environment variable | Default | Description |
+|---|---|---|---|
+| `--role ROLE` | `LANLINK_ROLE` | — | `coordinator`, `peer`, or `relay` |
+| `--coord-url URL` | `LANLINK_COORD_URL` | — | Peer/coordinator base URL |
+| `--listen ADDR` | `LANLINK_LISTEN` | role-specific | Coordinator: `0.0.0.0:8080`; relay: `0.0.0.0:3478` |
+| `--relay-server ADDR` | `LANLINK_RELAY_SERVER` | — | Relay address advertised by the coordinator |
+| `--network NAME` | `LANLINK_NETWORK` | — | Peer network name |
+| `--password PASS` | `LANLINK_PASSWORD` | — | Peer network password |
+| `--password-file FILE` | `LANLINK_PASSWORD_FILE` | — | File containing the peer password |
+| `--data-dir PATH` | `LANLINK_DATA_DIR` | `/var/lib/lanlink` | Coordinator SQLite directory |
+| `--gui SELECTOR` | `LANLINK_GUI` | `none` | `none`, `tui`, `web`, `desktop`, `all` |
+| `--pkg TYPE` | `LANLINK_PKG` | auto | `deb`, `rpm`, `aur`, `tarball` |
+| `--version VERSION` | `LANLINK_VERSION` | latest release | Exact release version |
+| `--channel CHANNEL` | `LANLINK_CHANNEL` | `stable` | Release channel |
+| `--prefix PATH` | `LANLINK_INSTALL_PREFIX` | `/usr/local` | Install prefix for tarballs |
+| `--yes` | `LANLINK_YES=1` | prompt | Non-interactive mode |
+| `--dry-run` | — | — | Print actions without changing the system |
+| `--uninstall` | — | — | Remove role-specific config and units |
+| `--reconfigure` | — | — | Overwrite existing config files |
+| `--with-relay` | — | — | Also install/start `lanlink-relayd` for the coordinator role |
+| `--purge` | — | — | Uninstall the package as well as role files |
+| — | `LANLINK_REPO` | `febux/LanLink` | Override the GitHub repository used for downloads |
+
+Run the local copy for a dry-run or when testing from the repo:
 
 ```bash
-curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash -s -- --role peer --coord-url http://COordinator:8080 --network mynet --password "s3cret" --yes
+bash scripts/install.sh --help
+bash scripts/install.sh --dry-run --role coordinator
 ```
 
-Options:
+## Role-based install
 
-| Option | Default | Description |
-|---|---|---|
-| `--coord-url` | required | `http(s)://host:port` of the coordinator |
-| `--network` | required | network name to join |
-| `--password` / `--password-file` | required | network password |
-| `--data-dir` | `/var/lib/lanlink` | runtime data directory |
-| `--gui` | `none` | GUI selector: `desktop`, `web`, `tui`, `all`, `none` |
-| `--pkg` | auto | `deb`, `rpm`, `aur`, `tarball` |
+### Peer (join a network)
 
-The wizard creates `/etc/lanlink/<network>.toml`, writes a 0600 secret, runs
-`lanlinkd service up <network>`, and starts `lanlinkd@<network>.service`.
-
-### Common modes
-
-| Flag | Effect |
-|---|---|
-| `--dry-run` | Print every step; do not write files, install packages, or start services. |
-| `--yes` / `-y` | Skip all prompts and accept defaults. |
-| `--uninstall` | Stop and disable units for the selected role, remove config/secrets, and uninstall the package. |
-
-Run `bash lanlink-install.sh --help` for the full option list.
-
-### Windows
-
-Run in an **elevated PowerShell**:
-
-```powershell
-irm https://raw.githubusercontent.com/febux/LanLink/master/dist/windows/install.ps1 | iex
-```
-
-Then create or join a network:
-
-```powershell
-lanlinkd service up --name gaming-night --password "s3cret"
-# or open LanLink from the Start Menu
-```
-
-### macOS
-
-Download the latest `.pkg` from [GitHub Releases](https://github.com/lanlink/lanlink/releases)
-and double-click it, or run:
+The peer role installs the package, writes `/etc/lanlink/<network>.toml` and
+`/etc/lanlink/<network>.secret`, then runs `lanlinkd service up <network>` to
+install and start `lanlinkd@<network>.service`.
 
 ```bash
-sudo installer -pkg lanlink-*-macos-*.pkg -target /
+# Interactive
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash -s -- --role peer
+
+# Non-interactive
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role peer \
+    --coord-url https://coord.example.com \
+    --network gaming-night \
+    --password 's3cret' \
+    --yes
+
+# Use a password file instead of the command line
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  LANLINK_PASSWORD_FILE=/etc/lanlink/gaming-night.secret \
+  bash -s -- --role peer --coord-url https://coord.example.com --network gaming-night --yes
+
+# Include the desktop GUI in the install
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role peer --gui desktop --coord-url https://coord.example.com \
+    --network gaming-night --password 's3cret' --yes
 ```
 
-## Manual package downloads
+After the wizard finishes:
 
-All release artifacts are published to [GitHub Releases](https://github.com/lanlink/lanlink/releases):
+```bash
+sudo systemctl status lanlinkd@gaming-night --no-pager
+ip addr show lanlink0            # virtual NIC with 26.x.x.x address
+```
+
+See [`docs/peer.md`](./peer.md) for the full peer wizard reference.
+
+### Coordinator (self-host)
+
+The coordinator role installs the package, creates `/var/lib/lanlink/`, writes
+`/etc/systemd/system/lanlink-coordinator.service`, and starts the unit.
+
+```bash
+# Public coordinator with default listen 0.0.0.0:8080
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role coordinator --yes
+
+# Also deploy lanlink-relayd on the same host
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role coordinator --with-relay --yes
+
+# Custom listen address and data directory
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role coordinator --listen 0.0.0.0:18080 \
+    --data-dir /srv/lanlink --yes
+```
+
+The wizard prints the peer join command at the end:
+
+```bash
+LANLINK_PASSWORD='your-password' lanlinkd service up <network-name> --coordinator http://127.0.0.1:8080
+```
+
+> For a public VPS you still need a reverse proxy such as Caddy for TLS; the
+> wizard only sets up the LanLink side. See [`docs/deployment.md`](./deployment.md)
+> for the full VPS guide.
+
+See [`docs/coordinator.md`](./coordinator.md) for the full coordinator wizard reference.
+
+### Relay (self-host)
+
+The relay role installs the package, writes
+`/etc/systemd/system/lanlink-relayd.service`, and starts the unit on UDP
+`0.0.0.0:3478` by default.
+
+```bash
+# Default relay
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role relay --yes
+
+# Custom listen address
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role relay --listen 0.0.0.0:3478 --yes
+```
+
+Then point the coordinator at the relay's public address:
+
+```bash
+# passed to the coordinator wizard or edited in the unit
+--relay-server 203.0.113.42:3478
+```
+
+See [`docs/relay.md`](./relay.md) for the full relay wizard reference.
+
+## Common modes
+
+### `--dry-run`
+
+Prints every download, file write, and systemctl command without executing any
+of them. Use it to preview what the wizard will do.
+
+```bash
+bash scripts/install.sh --dry-run --role peer \
+  --coord-url https://coord.example.com --network gaming-night
+```
+
+### `--yes`
+
+Skips all prompts and accepts defaults. Required for fully non-interactive
+provisioning. Any value that the wizard cannot default must be supplied via env
+or CLI.
+
+```bash
+curl -fsSL .../lanlink-install.sh | \
+  LANLINK_ROLE=peer \
+  LANLINK_COORD_URL=https://coord.example.com \
+  LANLINK_NETWORK=gaming-night \
+  LANLINK_PASSWORD_FILE=/etc/lanlink/gaming-night.secret \
+  bash -s -- --yes
+```
+
+### `--reconfigure`
+
+By default the wizard preserves an existing `/etc/lanlink/<network>.toml` and
+`/etc/systemd/system/lanlink-coordinator.service`. Pass `--reconfigure` to
+overwrite them.
+
+```bash
+bash scripts/install.sh --role peer --network gaming-night --reconfigure
+```
+
+### `--uninstall` and `--purge`
+
+Stop and disable role-specific units, remove role-specific configs/secrets, and
+optionally remove the package.
+
+```bash
+# Remove only the peer role files
+bash scripts/install.sh --role peer --network gaming-night --uninstall --yes
+
+# Also remove the .deb/.rpm package
+bash scripts/install.sh --role peer --network gaming-night --uninstall --purge --yes
+
+# Remove the coordinator role
+bash scripts/install.sh --role coordinator --uninstall --yes
+
+# Remove the relay role
+bash scripts/install.sh --role relay --uninstall --yes
+```
+
+## Upgrades
+
+Run the wizard again with the same role. It installs the newer package only if
+the requested version is newer than the installed one, restarts any units that
+were already running, and preserves operator-edited configs unless you pass
+`--reconfigure`.
+
+```bash
+# Upgrade a peer in place
+bash scripts/install.sh --role peer --network gaming-night --yes
+
+# Upgrade and force config rewrite
+bash scripts/install.sh --role peer --network gaming-night --reconfigure --yes
+```
+
+## GUI and package selectors
+
+Peer installs can include a front-end with `--gui` (or `LANLINK_GUI`):
+
+```bash
+bash scripts/install.sh --role peer --gui tui   # terminal UI
+bash scripts/install.sh --role peer --gui web   # browser UI
+bash scripts/install.sh --role peer --gui desktop # Tauri desktop app
+bash scripts/install.sh --role peer --gui all   # all front-ends
+```
+
+Override package auto-detection with `--pkg` (or `LANLINK_PKG`):
+
+```bash
+bash scripts/install.sh --role peer --pkg deb
+bash scripts/install.sh --role peer --pkg rpm
+bash scripts/install.sh --role peer --pkg aur
+bash scripts/install.sh --role peer --pkg tarball
+```
+
+## Fallback: manual install
+
+If the wizard cannot run on your system, install the same artifacts manually.
+All release artifacts are published to
+[GitHub Releases](https://github.com/febux/LanLink/releases):
 
 | Format | File | Best for |
 |---|---|---|
@@ -155,22 +301,17 @@ All release artifacts are published to [GitHub Releases](https://github.com/lanl
 | Flatpak | `lanlink-*-linux-x86_64.flatpak` | Flatpak users |
 | Snap | `lanlink_*_amd64.snap` | snap users |
 
-## Package-specific instructions
-
 ### Debian / Ubuntu (.deb)
 
-Released `.deb` packages include the native desktop GUI by default.
-
 ```bash
-# Download from GitHub Releases, then:
 sudo dpkg -i lanlink_*_amd64.deb
-sudo apt-get install -f   # install any missing dependencies
+sudo apt-get install -f
 ```
 
 Or build from source:
 
 ```bash
-make build-deb LL_GUI=all   # include all front-ends
+make build-deb LL_GUI=all
 ```
 
 ### Fedora / RHEL (.rpm)
@@ -195,81 +336,48 @@ sudo ./lanlink-*/install-local.sh
 
 This installs to `/usr/local` and registers systemd units.
 
-### AppImage
-
-```bash
-chmod +x lanlink-*-linux-x86_64.AppImage
-./lanlink-*-linux-x86_64.AppImage
-```
-
-### Flatpak
-
-```bash
-flatpak install ./lanlink-*-linux-x86_64.flatpak
-flatpak run com.lanlink.LanLink
-```
-
-### Snap
-
-```bash
-sudo snap install --dangerous --devmode ./lanlink_*_amd64.snap
-lanlink
-```
-
-## Start the service after install
-
-### Linux
-
-```bash
-# One-command ad-hoc network (creates config + secret + systemd unit)
-LANLINK_PASSWORD='s3cret' sudo -E lanlinkd service up gaming-night
-
-# Or manage the config manually
-sudo cp /etc/lanlink/lanlinkd.example.toml /etc/lanlink/gaming-night.toml
-sudoedit /etc/lanlink/gaming-night.toml
-sudo lanlinkd service install
-sudo lanlinkd service start gaming-night
-sudo lanlinkd service enable gaming-night
-```
-
 ### Windows
 
-```powershell
-# One command: resolve/create the network, write config, start the service
-lanlinkd service up --name gaming-night --password "s3cret"
+Run in an **elevated PowerShell**:
 
-# Or manage the config manually
-copy "C:\Program Files\LanLink\lanlinkd.example.toml" "C:\Program Files\LanLink\lanlinkd.toml"
-notepad "C:\Program Files\LanLink\lanlinkd.toml"
-sc start LanLinkDaemon
+```powershell
+irm https://raw.githubusercontent.com/febux/LanLink/master/dist/windows/install.ps1 | iex
+lanlinkd service up --name gaming-night --password "s3cret"
 ```
 
 ### macOS
 
-```bash
-sudo launchctl load /Library/LaunchDaemons/com.lanlink.lanlinkd.plist
-```
-
-## Running the GUI after install
+Download the latest `.pkg` from GitHub Releases and run:
 
 ```bash
-# Native desktop app
-lanlink-desktop
-
-# Browser WebUI (auto-opens browser by default)
-lanlink-web
-
-# Terminal UI
-lanlink-tui
-
-# Unified launcher
-lanlink-gui --mode desktop
-lanlink-gui --mode web
-lanlink-gui --mode tui
-
-# Full dev stack: coordinator + daemon + front-end, no manual service setup
-lanlink-gui --dev --mode desktop
+sudo installer -pkg lanlink-*-macos-*.pkg -target /
 ```
+
+## Service management after install
+
+The wizard starts and enables the relevant systemd units. You can manage them
+with `lanlinkd service` or `systemctl` directly:
+
+```bash
+# Peer instance for network "gaming-night"
+sudo systemctl status lanlinkd@gaming-night --no-pager
+sudo systemctl stop lanlinkd@gaming-night
+sudo systemctl start lanlinkd@gaming-night
+
+# Coordinator and relay
+sudo systemctl status lanlink-coordinator --no-pager
+sudo systemctl status lanlink-relayd --no-pager
+```
+
+For a manual ad-hoc join without writing a config file:
+
+```bash
+LANLINK_PASSWORD='s3cret' sudo -E lanlinkd up --name gaming-night \
+  --coordinator https://coord.example.com
+```
+
+For persistent production use with a manually-managed config file, see
+[`docs/ops.md`](./ops.md).
 
 ## Build selector reference
 
@@ -283,6 +391,9 @@ lanlink-gui --dev --mode desktop
 
 ## Troubleshooting
 
+- `bash scripts/install.sh --help` — verify the documented options match the
+  running version of the wizard.
+- `bash scripts/install.sh --dry-run ...` — preview every command before it runs.
 - `dpkg: dependency problems` → run `sudo apt-get install -f` after `dpkg -i`.
 - Desktop build fails on Linux → install `webkit2gtk-4.1` headers
   (`libwebkit2gtk-4.1-dev` on Debian/Ubuntu, `webkit2gtk-4.1` on Arch).

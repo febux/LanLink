@@ -59,32 +59,68 @@ For the CI-only tag push path, use `make dist-publish-ci VERSION=0.2.0`.
 ### Linux
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh
+# Interactive wizard (prompts for role and details)
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash
 ```
 
-Options: `--role coordinator|peer|relay`, `--gui desktop|web|tui|all|none`,
-`--pkg deb|rpm|tarball|appimage|flatpak|snap`, `--dry-run`, `--yes`,
-`--uninstall`.
+Options and their equivalent environment variables:
+
+| Flag | Environment variable | Description |
+|---|---|---|
+| `--role` | `LANLINK_ROLE` | `coordinator`, `peer`, or `relay` |
+| `--coord-url` | `LANLINK_COORD_URL` | Coordinator base URL (peer) |
+| `--listen` | `LANLINK_LISTEN` | Coordinator/relay listen address |
+| `--relay-server` | `LANLINK_RELAY_SERVER` | Relay address advertised to peers |
+| `--network` | `LANLINK_NETWORK` | Peer network name |
+| `--password` | `LANLINK_PASSWORD` | Peer network password |
+| `--password-file` | `LANLINK_PASSWORD_FILE` | Path to password file |
+| `--data-dir` | `LANLINK_DATA_DIR` | Coordinator SQLite directory |
+| `--gui` | `LANLINK_GUI` | `none`, `tui`, `web`, `desktop`, `all` |
+| `--pkg` | `LANLINK_PKG` | `deb`, `rpm`, `aur`, `tarball` |
+| `--version` | `LANLINK_VERSION` | Exact release version |
+| `--channel` | `LANLINK_CHANNEL` | Release channel |
+| `--prefix` | `LANLINK_INSTALL_PREFIX` | Install prefix for tarballs |
+| `--yes` | `LANLINK_YES=1` | Non-interactive mode |
+| `--dry-run` | — | Preview actions without changing the system |
+| `--uninstall` | — | Remove role-specific config and units |
+| `--reconfigure` | — | Overwrite existing config files |
+| `--with-relay` | — | Also deploy `lanlink-relayd` for coordinator role |
+| `--purge` | — | Uninstall the package as well |
+| — | `LANLINK_REPO` | Override the GitHub repository used for downloads |
+
+Environment variables win over CLI flags, which makes CI provisioning easy.
 
 Role examples:
 
 ```sh
 # Self-host the control plane
-curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh -s -- --role coordinator --yes
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role coordinator --yes
 
 # Self-host the UDP relay fallback
-curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh -s -- --role relay --yes
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role relay --yes
 
 # Join a network from the current host
-curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh -s -- --role peer --coord-url http://coordinator:8080 --network mynet --password "s3cret" --yes
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role peer \
+    --coord-url https://coord.example.com \
+    --network mynet \
+    --password 's3cret' \
+    --yes
+
+# Preview what the wizard will do (no changes)
+bash scripts/install.sh --dry-run --role peer --coord-url https://coord.example.com --network mynet
 ```
+
+For the full install guide, see [`docs/install.md`](../docs/install.md).
 
 ### Windows
 
 Run in an elevated PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/lanlink/lanlink/main/dist/windows/install.ps1 | iex
+irm https://raw.githubusercontent.com/febux/LanLink/master/dist/windows/install.ps1 | iex
 ```
 
 ## Building the .deb with GUI front-ends

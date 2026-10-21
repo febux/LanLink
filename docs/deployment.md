@@ -17,6 +17,29 @@ VPS public IP, throughout.
 
 ---
 
+## Quick wizard path (recommended)
+
+The easiest way to install the coordinator (and optionally the relay on the same
+host) is the install wizard:
+
+```bash
+# Coordinator only
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role coordinator --yes
+
+# Coordinator + relay on the same VPS
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | \
+  bash -s -- --role coordinator --with-relay --yes
+```
+
+For the full coordinator wizard reference, see [`docs/coordinator.md`](./coordinator.md).
+For the relay wizard reference, see [`docs/relay.md`](./relay.md).
+
+The manual steps below are the **advanced/fallback** path for operators who
+need custom builds, additional hardening, or a TLS reverse proxy such as Caddy.
+
+---
+
 ## Prerequisites
 
 - A VPS with a static public IP.

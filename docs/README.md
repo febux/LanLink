@@ -7,6 +7,9 @@ Markdown files that can be read directly or built into a static HTML site.
 
 - `SUMMARY.md` — mdBook-style table of contents.
 - `intro.md` — project overview.
+- `install.md` — wizard-based installation guide.
+- `coordinator.md`, `peer.md`, `relay.md` — role-specific wizard reference.
+- `deployment.md` — VPS coordinator/relay deployment with TLS.
 - `protocol.md` — wire protocol and control-plane API.
 - `ops.md` — operator runbooks (install, configure, troubleshoot).
 - `threat-model.md` — security model and privacy notes.
