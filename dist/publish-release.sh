@@ -261,13 +261,19 @@ build_snap() {
 
 collect_existing() {
   local dirs=("${SCRIPT_DIR}/deb/out" "${SCRIPT_DIR}/rpm/out" "${SCRIPT_DIR}/macos/out" "${SCRIPT_DIR}/windows/out" "${SCRIPT_DIR}/tarball/out" "${SCRIPT_DIR}/appimage/out" "${SCRIPT_DIR}/flatpak/out")
+  local d f
   for d in "${dirs[@]}"; do
-    for f in "$d"/*.{deb,rpm,pkg,msi,tar,gz,AppImage,flatpak,snap}; do
-      [ -f "$f" ] && ARTIFACTS+=("$f")
+    [ -d "$d" ] || continue
+    for f in "$d"/*.{deb,rpm,pkg,msi,tar.gz,AppImage,flatpak,snap}; do
+      if [ -f "$f" ]; then
+        ARTIFACTS+=("$f")
+      fi
     done
   done
   for f in "${SCRIPT_DIR}/snap"/*.snap; do
-    [ -f "$f" ] && ARTIFACTS+=("$f")
+    if [ -f "$f" ]; then
+      ARTIFACTS+=("$f")
+    fi
   done
 }
 
@@ -283,6 +289,30 @@ else
   has_platform appimage && build_appimage
   has_platform flatpak && build_flatpak
   has_platform snap && build_snap
+fi
+
+# Include the install wizard in the release and generate a SHA256SUMS file
+# covering every release artifact. The checksum file uses basenames so the
+# wizard can look up artifacts by filename.
+INSTALL_SCRIPT_SRC="${REPO_DIR}/scripts/install.sh"
+INSTALL_SCRIPT_DST="${SCRIPT_DIR}/lanlink-install.sh"
+if [ -f "${INSTALL_SCRIPT_SRC}" ]; then
+  cp "${INSTALL_SCRIPT_SRC}" "${INSTALL_SCRIPT_DST}"
+  ARTIFACTS+=("${INSTALL_SCRIPT_DST}")
+else
+  echo "[publish] WARNING: install wizard not found: ${INSTALL_SCRIPT_SRC}" >&2
+fi
+
+if [ "${#ARTIFACTS[@]}" -gt 0 ]; then
+  SHA256SUMS_FILE="${SCRIPT_DIR}/SHA256SUMS"
+  : > "${SHA256SUMS_FILE}"
+  for f in "${ARTIFACTS[@]}"; do
+    if [ -f "${f}" ]; then
+      hash="$(sha256sum "${f}" | awk '{print $1}')"
+      printf '%s  %s\n' "${hash}" "$(basename "${f}")" >> "${SHA256SUMS_FILE}"
+    fi
+  done
+  ARTIFACTS+=("${SHA256SUMS_FILE}")
 fi
 
 if [ "${#ARTIFACTS[@]}" -eq 0 ]; then

@@ -393,8 +393,9 @@ async fn up(
     let config_path_obj = std::path::Path::new(&config_path);
     if config_path_obj.is_dir() {
         tracing::warn!(path = %config_path, "removing leftover directory that blocks config file write");
-        std::fs::remove_dir_all(&config_path)
-            .map_err(|e| anyhow::anyhow!("failed to remove leftover directory {}: {e}", config_path))?;
+        std::fs::remove_dir_all(&config_path).map_err(|e| {
+            anyhow::anyhow!("failed to remove leftover directory {}: {e}", config_path)
+        })?;
     }
 
     std::fs::write(&secret_path, password.as_bytes())
@@ -480,12 +481,12 @@ mod windows_impl {
     use std::ffi::OsString;
     use std::sync::mpsc;
     use std::time::Duration;
+    use tracing_subscriber::prelude::*;
     use windows_service::define_windows_service;
     use windows_service::service::{
         ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
         ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
     };
-    use tracing_subscriber::prelude::*;
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
     use windows_service::{service_dispatcher, Error as WinSvcError};

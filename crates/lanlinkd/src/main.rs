@@ -1612,19 +1612,28 @@ fn is_udp_icmp_reset(e: &std::io::Error) -> bool {
 #[test]
 fn is_udp_icmp_reset_detects_winsock_connreset() {
     let e = std::io::Error::from_raw_os_error(10054);
-    assert!(is_udp_icmp_reset(&e), "raw os error 10054 should be classified as ICMP reset");
+    assert!(
+        is_udp_icmp_reset(&e),
+        "raw os error 10054 should be classified as ICMP reset"
+    );
 }
 
 #[test]
 fn is_udp_icmp_reset_detects_connection_reset_kind() {
     let e = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "icmp reset");
-    assert!(is_udp_icmp_reset(&e), "ConnectionReset kind should be classified as ICMP reset");
+    assert!(
+        is_udp_icmp_reset(&e),
+        "ConnectionReset kind should be classified as ICMP reset"
+    );
 }
 
 #[test]
 fn is_udp_icmp_reset_ignores_other_errors() {
     let e = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
-    assert!(!is_udp_icmp_reset(&e), "unrelated errors should not be classified as ICMP reset");
+    assert!(
+        !is_udp_icmp_reset(&e),
+        "unrelated errors should not be classified as ICMP reset"
+    );
 }
 
 #[cfg(windows)]

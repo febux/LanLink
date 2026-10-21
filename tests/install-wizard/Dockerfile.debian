@@ -1,0 +1,20 @@
+FROM debian:trixie
+ENV container=docker
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    systemd systemd-sysv sudo curl ca-certificates coreutils dpkg adduser socat \
+    iproute2 iputils-ping netcat-openbsd nftables libwebkit2gtk-4.1-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Mask unnecessary services to keep container boot quick.
+RUN systemctl mask getty@tty1.service systemd-networkd-wait-online.service
+
+COPY dist/deb/out/lanlink_0.6.1-1_amd64.deb /tmp/lanlink.deb
+COPY dist/systemd/*.service /tmp/systemd/
+
+# Install the package.
+RUN dpkg -i /tmp/lanlink.deb || true \
+    && apt-get install -f -y || true
+
+STOPSIGNAL SIGRTMIN+3
+CMD ["/lib/systemd/systemd"]

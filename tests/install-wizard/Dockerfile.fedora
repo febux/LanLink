@@ -1,0 +1,12 @@
+FROM fedora:latest
+ENV container=docker
+ENV DEBIAN_FRONTEND=noninteractive
+RUN dnf install -y systemd systemd-sysv sudo curl ca-certificates coreutils socat iproute iputils netcat nftables \
+    && dnf clean all
+
+RUN systemctl mask getty@tty1.service systemd-networkd-wait-online.service
+
+COPY dist/tarball/out/lanlink-0.6.1-linux-x86_64.tar.gz /tmp/lanlink.tar.gz
+COPY dist/systemd/*.service /tmp/systemd/
+
+CMD ["/usr/lib/systemd/systemd"]

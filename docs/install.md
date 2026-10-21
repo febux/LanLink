@@ -50,6 +50,72 @@ curl -fsSL ... | sh -s -- --pkg flatpak   # Flatpak bundle
 curl -fsSL ... | sh -s -- --pkg snap      # Snap package
 ```
 
+## Role-based install wizard
+
+`scripts/install.sh` (also published to GitHub Releases as `lanlink-install.sh`)
+supports `--role coordinator|peer|relay` for a single-command deployment of an
+entire LanLink node. It detects the distro, downloads or uses the matching
+package, installs systemd units, configures secrets, and starts the service.
+
+### coordinator
+
+```bash
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash -s -- --role coordinator --yes
+```
+
+Options:
+
+| Option | Default | Description |
+|---|---|---|
+| `--listen` | `0.0.0.0:8080` | REST API listen address |
+| `--relay-server` | none | `--relay-server` passed to `lanlink-coordinator` |
+| `--data-dir` | `/var/lib/lanlink` | SQLite database directory |
+
+The wizard enables `lanlink-coordinator.service` and prints the peer join
+command.
+
+### relay
+
+```bash
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash -s -- --role relay --yes
+```
+
+Options:
+
+| Option | Default | Description |
+|---|---|---|
+| `--listen` | `0.0.0.0:3478` | UDP relay listen address |
+
+### peer
+
+```bash
+curl -fsSL https://github.com/febux/LanLink/releases/download/v0.6.1/lanlink-install.sh | bash -s -- --role peer --coord-url http://COordinator:8080 --network mynet --password "s3cret" --yes
+```
+
+Options:
+
+| Option | Default | Description |
+|---|---|---|
+| `--coord-url` | required | `http(s)://host:port` of the coordinator |
+| `--network` | required | network name to join |
+| `--password` / `--password-file` | required | network password |
+| `--data-dir` | `/var/lib/lanlink` | runtime data directory |
+| `--gui` | `none` | GUI selector: `desktop`, `web`, `tui`, `all`, `none` |
+| `--pkg` | auto | `deb`, `rpm`, `aur`, `tarball` |
+
+The wizard creates `/etc/lanlink/<network>.toml`, writes a 0600 secret, runs
+`lanlinkd service up <network>`, and starts `lanlinkd@<network>.service`.
+
+### Common modes
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Print every step; do not write files, install packages, or start services. |
+| `--yes` / `-y` | Skip all prompts and accept defaults. |
+| `--uninstall` | Stop and disable units for the selected role, remove config/secrets, and uninstall the package. |
+
+Run `bash lanlink-install.sh --help` for the full option list.
+
 ### Windows
 
 Run in an **elevated PowerShell**:

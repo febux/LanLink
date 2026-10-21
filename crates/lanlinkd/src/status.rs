@@ -611,9 +611,7 @@ mod tests {
         let addr = listener.local_addr().expect("local addr");
 
         let client = tokio::spawn(async move {
-            let mut stream = tokio::net::TcpStream::connect(addr)
-                .await
-                .expect("connect");
+            let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
             stream
                 .write_all(b"{\"cmd\":\"snapshot\"}\n")
                 .await

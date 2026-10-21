@@ -62,7 +62,22 @@ For the CI-only tag push path, use `make dist-publish-ci VERSION=0.2.0`.
 curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh
 ```
 
-Options: `--gui desktop|web|tui|all`, `--pkg deb|rpm|tarball|appimage|flatpak|snap`.
+Options: `--role coordinator|peer|relay`, `--gui desktop|web|tui|all|none`,
+`--pkg deb|rpm|tarball|appimage|flatpak|snap`, `--dry-run`, `--yes`,
+`--uninstall`.
+
+Role examples:
+
+```sh
+# Self-host the control plane
+curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh -s -- --role coordinator --yes
+
+# Self-host the UDP relay fallback
+curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh -s -- --role relay --yes
+
+# Join a network from the current host
+curl -fsSL https://raw.githubusercontent.com/lanlink/lanlink/main/dist/install.sh | sh -s -- --role peer --coord-url http://coordinator:8080 --network mynet --password "s3cret" --yes
+```
 
 ### Windows
 

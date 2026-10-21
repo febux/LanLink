@@ -209,9 +209,9 @@ async fn run_nft(script: &str) -> Result<(), FirewallError> {
 /// return traffic is allowed automatically.
 #[cfg(any(target_os = "windows", test))]
 pub mod windows {
-    use super::FirewallProfile;
     #[cfg(target_os = "windows")]
     use super::FirewallError;
+    use super::FirewallProfile;
 
     /// NetFirewall rule group used for all rules of one interface. Alphanumeric
     /// only, since the group name is embedded in PowerShell single-quoted

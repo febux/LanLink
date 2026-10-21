@@ -532,7 +532,7 @@ phys_interface = "enp3s0"
             "[network]\ncoordinator = \"http://x\"\nnetwork_id = 1\npassword_file = \"C:/Program Files/LanLink/gaming-night.secret\"\n",
         )
         .unwrap();
-        let dir = std::env::temp_dir().join(format!("lanlink-pwslash-test-{}" , std::process::id()));
+        let dir = std::env::temp_dir().join(format!("lanlink-pwslash-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("gaming-night.secret");
         std::fs::write(&path, "secret\n").unwrap();
@@ -553,7 +553,10 @@ phys_interface = "enp3s0"
         let result = toml::from_str::<FileConfig>(
             "[network]\ncoordinator = \"http://x\"\nnetwork_id = 1\npassword_file = \"C:\\Program Files\\LanLink\\network.secret\"\n",
         );
-        assert!(result.is_err(), "backslashes in a TOML basic string must be rejected");
+        assert!(
+            result.is_err(),
+            "backslashes in a TOML basic string must be rejected"
+        );
     }
 
     #[test]

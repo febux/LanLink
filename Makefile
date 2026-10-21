@@ -176,7 +176,15 @@ e2e: ## Run all e2e scenarios (requires root; build first)
 # Group: Publishers
 # ---------------------------------------------------------------------------
 
-.PHONY: dist-publish dist-publish-ci dist-clean bump-version
+.PHONY: dist-publish dist-publish-ci dist-clean bump-version publish-install-script test-install-wizard
+
+publish-install-script: ## Copy install script to dist/ for local testing
+	install -Dm0755 scripts/install.sh dist/lanlink-install.sh
+
+test-install-wizard: ## Run install-wizard container matrix tests (requires Docker)
+	bash tests/install-wizard/test-debian.sh
+	bash tests/install-wizard/test-fedora.sh
+	bash tests/install-wizard/test-arch.sh
 
 dist-publish: ## Build and publish a GitHub release (VERSION required for safety)
 	bash $(PUBLISH) $(VERSION) $(PUBLISH_OPTS)
@@ -186,7 +194,7 @@ dist-publish-ci: ## Push release tag only; CI will build and publish
 
 dist-clean: ## Remove distribution staging/output directories
 	rm -rf dist/deb/root dist/deb/out dist/macos/root dist/macos/out \
-	       dist/windows/out dist/windows/stage dist/rpm/out
+	       dist/windows/out dist/windows/stage dist/rpm/out dist/lanlink-install.sh dist/SHA256SUMS
 
 bump-version: ## Bump workspace version, e.g. make bump-version VERSION=0.3.0
 ifndef VERSION

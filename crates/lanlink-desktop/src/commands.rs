@@ -61,7 +61,9 @@ async fn is_elevated() -> bool {
 async fn run_lanlinkd_service_direct(args: &[&str]) -> Result<String, String> {
     let exe = lanlinkd_exe();
     let mut cmd = tokio::process::Command::new(&exe);
-    cmd.arg("service").args(args).creation_flags(CREATE_NO_WINDOW);
+    cmd.arg("service")
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW);
     let output = cmd
         .output()
         .await
@@ -113,9 +115,7 @@ async fn run_lanlinkd_service_elevated(args: &[&str]) -> Result<String, String> 
     }
     if let Some(pw) = &password {
         if pw.contains('"') {
-            return Err(
-                "password must not contain double-quote characters".to_string(),
-            );
+            return Err("password must not contain double-quote characters".to_string());
         }
     }
 
@@ -134,7 +134,10 @@ async fn run_lanlinkd_service_elevated(args: &[&str]) -> Result<String, String> 
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| r"C:\Program Files\LanLink".to_string());
     let config_dir_escaped = config_dir.replace('\\', "\\\\");
-    let log_escaped = log_path.to_string_lossy().replace('\\', "\\\\").replace('%', "%%");
+    let log_escaped = log_path
+        .to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('%', "%%");
     batch.push_str(&format!(
         "echo [elevated] running as: %USERDOMAIN%\\%USERNAME%\r\n"
     ));
@@ -165,7 +168,13 @@ async fn run_lanlinkd_service_elevated(args: &[&str]) -> Result<String, String> 
         bat_path.to_string_lossy().replace('\'', "''")
     );
     let output = tokio::process::Command::new("powershell")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_script])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &ps_script,
+        ])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .await
@@ -194,7 +203,11 @@ async fn run_lanlinkd_service_elevated(args: &[&str]) -> Result<String, String> 
         ));
     }
 
-    Ok(if text.is_empty() { "done".to_string() } else { text })
+    Ok(if text.is_empty() {
+        "done".to_string()
+    } else {
+        text
+    })
 }
 
 /// Tauri-managed state shared across commands.
@@ -239,10 +252,7 @@ fn sibling_exe(name: &str) -> PathBuf {
 /// Loopback `host:port` the built-in coordinator should listen on, derived
 /// from the configured coordinator URL when it points at this machine.
 fn builtin_coordinator_listen(url: &str) -> String {
-    let rest = url
-        .split_once("://")
-        .map(|(_, r)| r)
-        .unwrap_or(url);
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let authority = rest.split('/').next().unwrap_or(rest);
     match authority.rsplit_once(':') {
         Some((host, port)) if host == "localhost" || host == "127.0.0.1" => {
@@ -260,7 +270,9 @@ async fn coordinator_reachable(base: &str, http: &Client) -> bool {
         .send()
         .await
     {
-        Ok(resp) => resp.status().is_success() || resp.status() == reqwest::StatusCode::UNAUTHORIZED,
+        Ok(resp) => {
+            resp.status().is_success() || resp.status() == reqwest::StatusCode::UNAUTHORIZED
+        }
         Err(_) => false,
     }
 }
@@ -317,7 +329,10 @@ pub async fn coordinator_start(state: State<'_, DesktopState>) -> Result<String,
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(300)).await;
         if coordinator_reachable(&state.coordinator, &state.http).await {
-            return Ok(format!("coordinator started on {listen} (db: {})", db.display()));
+            return Ok(format!(
+                "coordinator started on {listen} (db: {})",
+                db.display()
+            ));
         }
     }
     Ok(format!(

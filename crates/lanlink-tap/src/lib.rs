@@ -211,7 +211,9 @@ fn wintun_dll_path() -> Option<std::path::PathBuf> {
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("wintun.dll"))),
-        Some(std::path::PathBuf::from(r"C:\Program Files\LanLink\wintun.dll")),
+        Some(std::path::PathBuf::from(
+            r"C:\Program Files\LanLink\wintun.dll",
+        )),
         Some(std::env::current_dir().ok()?.join("wintun.dll")),
     ];
     for c in candidates.into_iter().flatten() {
@@ -246,10 +248,10 @@ impl WindowsWintun {
             Ok(a) => a,
             Err(_) => wintun_bindings::Adapter::create(&wintun, &requested_name, "LanLink", None)
                 .map_err(|e| {
-                    NicError::Create(io::Error::other(format!(
-                        "create Wintun adapter '{requested_name}': {e}"
-                    )))
-                })?,
+                NicError::Create(io::Error::other(format!(
+                    "create Wintun adapter '{requested_name}': {e}"
+                )))
+            })?,
         };
 
         if let Err(e) = adapter.set_name(&requested_name) {
@@ -281,7 +283,9 @@ impl WindowsWintun {
             })?;
         let async_session = wintun_bindings::AsyncSession::from(session.clone());
 
-        let active_name = adapter.get_name().unwrap_or_else(|_| requested_name.clone());
+        let active_name = adapter
+            .get_name()
+            .unwrap_or_else(|_| requested_name.clone());
 
         tracing::info!(
             name = %active_name,

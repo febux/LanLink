@@ -600,10 +600,7 @@ pub mod windows {
     }
 
     #[cfg(target_os = "windows")]
-    pub(crate) async fn remove_route(
-        interface: &str,
-        subnet: &str,
-    ) -> Result<(), GatewayError> {
+    pub(crate) async fn remove_route(interface: &str, subnet: &str) -> Result<(), GatewayError> {
         run_powershell(&build_route_del_script(interface, subnet)).await
     }
 }
@@ -730,7 +727,10 @@ mod tests {
     #[test]
     fn subnet_cidr_variants() {
         assert_eq!(
-            subnet_cidr("26.1.2.99".parse().unwrap(), "255.255.255.0".parse().unwrap()),
+            subnet_cidr(
+                "26.1.2.99".parse().unwrap(),
+                "255.255.255.0".parse().unwrap()
+            ),
             "26.1.2.0/24"
         );
         assert_eq!(
@@ -738,7 +738,10 @@ mod tests {
             "10.0.0.0/8"
         );
         assert_eq!(
-            subnet_cidr("192.168.1.5".parse().unwrap(), "255.255.255.255".parse().unwrap()),
+            subnet_cidr(
+                "192.168.1.5".parse().unwrap(),
+                "255.255.255.255".parse().unwrap()
+            ),
             "192.168.1.5/32"
         );
     }
@@ -761,10 +764,13 @@ mod tests {
         #[test]
         fn enable_script_enables_forwarding_and_replaces_nat() {
             let script = windows::build_enable_script(&config());
-            assert!(script.contains("Set-NetIPInterface -InterfaceAlias 'lanlink0' -Forwarding Enabled"));
+            assert!(script
+                .contains("Set-NetIPInterface -InterfaceAlias 'lanlink0' -Forwarding Enabled"));
             // Idempotent: previous NAT instance removed before re-adding.
             let nat = windows::NAT_NAME;
-            assert!(script.contains(&format!("Get-NetNat -Name '{nat}' -ErrorAction SilentlyContinue | Remove-NetNat")));
+            assert!(script.contains(&format!(
+                "Get-NetNat -Name '{nat}' -ErrorAction SilentlyContinue | Remove-NetNat"
+            )));
             assert!(script.contains(&format!(
                 "New-NetNat -Name '{nat}' -InternalIPInterfaceAddressPrefix '26.0.0.0/24'"
             )));
@@ -774,7 +780,8 @@ mod tests {
         fn disable_script_removes_nat_and_forwarding() {
             let script = windows::build_disable_script("lanlink0");
             assert!(script.contains("Remove-NetNat -Confirm:$false"));
-            assert!(script.contains("Set-NetIPInterface -InterfaceAlias 'lanlink0' -Forwarding Disabled"));
+            assert!(script
+                .contains("Set-NetIPInterface -InterfaceAlias 'lanlink0' -Forwarding Disabled"));
         }
 
         #[test]
@@ -787,16 +794,23 @@ mod tests {
 
         #[test]
         fn route_add_script_replaces_then_adds() {
-            let script =
-                windows::build_route_add_script("lanlink0", "192.168.1.0/24", "26.0.0.2".parse().unwrap());
-            assert!(script.contains("Remove-NetRoute -DestinationPrefix '192.168.1.0/24' -InterfaceAlias 'lanlink0'"));
+            let script = windows::build_route_add_script(
+                "lanlink0",
+                "192.168.1.0/24",
+                "26.0.0.2".parse().unwrap(),
+            );
+            assert!(script.contains(
+                "Remove-NetRoute -DestinationPrefix '192.168.1.0/24' -InterfaceAlias 'lanlink0'"
+            ));
             assert!(script.contains("New-NetRoute -DestinationPrefix '192.168.1.0/24' -InterfaceAlias 'lanlink0' -NextHop '26.0.0.2'"));
         }
 
         #[test]
         fn route_del_script_removes_route() {
             let script = windows::build_route_del_script("lanlink0", "192.168.1.0/24");
-            assert!(script.contains("Remove-NetRoute -DestinationPrefix '192.168.1.0/24' -InterfaceAlias 'lanlink0'"));
+            assert!(script.contains(
+                "Remove-NetRoute -DestinationPrefix '192.168.1.0/24' -InterfaceAlias 'lanlink0'"
+            ));
         }
 
         #[test]
