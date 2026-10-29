@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LanLink</title>
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="style.css?v=4">
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
@@ -81,6 +81,13 @@
           <div class="stats">
             <div><span class="label">TX</span><span id="traffic-tx" class="value">0 B</span></div>
             <div><span class="label">RX</span><span id="traffic-rx" class="value">0 B</span></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Actions</h3>
+          <div class="action-row">
+            <button id="btn-disconnect" class="btn" type="button">Disconnect</button>
+            <button id="btn-stop" class="btn danger" type="button">Stop daemon</button>
           </div>
         </div>
       </div>
@@ -168,6 +175,6 @@
   </main>
 
   <div id="toast" class="toast"></div>
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

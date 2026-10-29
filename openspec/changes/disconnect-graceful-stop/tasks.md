@@ -41,7 +41,7 @@ Tracking: disconnect + graceful stop — `t_0cb9346f`.
 ## 6. GUI frontends
 
 - [x] 6.1 In `lanlink-desktop`, add tray menu items `Disconnect` and `Stop daemon`; add Tauri commands `disconnect_network` and `stop_daemon` that send the matching control commands to the discovered control socket. (t_ebf81f34)
-- [ ] 6.2 In `lanlink-desktop/assets/app.js`, add dashboard buttons for Disconnect/Stop and wire them to the new Tauri commands. (t_ebf81f34)
+- [x] 6.2 In `lanlink-desktop/assets/app.js`, add dashboard buttons for Disconnect/Stop and wire them to the new Tauri commands. (t_ebf81f34)
 - [x] 6.3 In `lanlink-tui`, add a key action (`d` for disconnect, `x` for stop) and/or a menu row; send the same control commands. (t_ebf81f34)
 - [x] 6.4 Update control-socket discovery in `lanlink-tui/src/daemon.rs` to use the persistent `lanlinkd-control.sock` path. (t_ebf81f34)
 

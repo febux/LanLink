@@ -354,3 +354,16 @@ button[type="submit"]:disabled { opacity: 0.6; cursor: not-allowed; }
   color: var(--muted);
   white-space: pre-wrap;
 }
+
+.action-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.btn.danger {
+  background: var(--danger);
+  color: #1a0505;
+}
+
+.btn.danger:hover { filter: brightness(1.1); }

@@ -330,6 +330,17 @@ async function runServiceCommand(cmd) {
   }
 }
 
+async function dashboardAction(cmd, label) {
+  try {
+    const result = await invoke(cmd);
+    toast(`${label}: ${result}`);
+    refreshSnapshot();
+  } catch (e) {
+    const msg = e?.message || String(e);
+    toast(`${label} failed: ${msg}`, true);
+  }
+}
+
 async function submitServiceUp(e) {
   e.preventDefault();
   const btn = $('#service-up-form button[type="submit"]');
@@ -465,6 +476,28 @@ function init() {
   if ($('#svc-start')) $('#svc-start').addEventListener('click', () => runServiceCommand('service_start'));
   if ($('#svc-stop')) $('#svc-stop').addEventListener('click', () => runServiceCommand('service_stop'));
   if ($('#svc-status')) $('#svc-status').addEventListener('click', () => runServiceCommand('service_status'));
+  if ($('#btn-disconnect')) {
+    $('#btn-disconnect').addEventListener('click', async () => {
+      const btn = $('#btn-disconnect');
+      btn.disabled = true;
+      try {
+        await dashboardAction('disconnect_network', 'Disconnect');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
+  if ($('#btn-stop')) {
+    $('#btn-stop').addEventListener('click', async () => {
+      const btn = $('#btn-stop');
+      btn.disabled = true;
+      try {
+        await dashboardAction('stop_daemon', 'Stop daemon');
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  }
   if ($('#coord-start')) $('#coord-start').addEventListener('click', () => coordinatorCommand('coordinator_start'));
   if ($('#coord-stop')) $('#coord-stop').addEventListener('click', () => coordinatorCommand('coordinator_stop'));
 
