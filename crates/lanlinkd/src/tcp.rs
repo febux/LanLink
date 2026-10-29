@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 const MAX_FRAME_LEN: usize = 2048;
 
@@ -31,16 +33,19 @@ pub struct TcpTransport {
 impl TcpTransport {
     /// Bind a TCP listener on `addr` and start the background transport task.
     /// Incoming packets are delivered to `incoming` with the remote address as
-    /// the source.
+    /// the source. The transport task and any per-connection tasks are tracked
+    /// by `tracker` and cancelled when `cancel` is triggered.
     pub async fn bind(
         addr: SocketAddr,
         incoming: tokio::sync::mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
+        tracker: &TaskTracker,
+        cancel: CancellationToken,
     ) -> anyhow::Result<(Self, SocketAddr)> {
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        tokio::spawn(run_transport(listener, incoming, rx));
+        tracker.spawn(run_transport(listener, incoming, rx, tracker.clone(), cancel));
         Ok((Self { tx }, local_addr))
     }
 
@@ -59,16 +64,22 @@ async fn run_transport(
     listener: TcpListener,
     incoming: tokio::sync::mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
     mut commands: tokio::sync::mpsc::UnboundedReceiver<TcpCommand>,
+    tracker: TaskTracker,
+    cancel: CancellationToken,
 ) {
     let mut connections: HashMap<SocketAddr, tokio::sync::mpsc::UnboundedSender<Vec<u8>>> =
         HashMap::new();
 
     loop {
         tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::debug!("TCP transport cancelled; closing listener and connections");
+                break;
+            }
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, from)) => {
-                        add_connection(stream, from, &mut connections, &incoming);
+                        add_connection(stream, from, &mut connections, &incoming, tracker.clone(), cancel.clone());
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "TCP accept failed");
@@ -88,7 +99,7 @@ async fn run_transport(
                         }
                         match TcpStream::connect(addr).await {
                             Ok(stream) => {
-                                add_connection(stream, addr, &mut connections, &incoming);
+                                add_connection(stream, addr, &mut connections, &incoming, tracker.clone(), cancel.clone());
                             }
                             Err(e) => {
                                 tracing::debug!(%addr, error = %e, "TCP connect failed");
@@ -107,13 +118,15 @@ fn add_connection(
     addr: SocketAddr,
     connections: &mut HashMap<SocketAddr, tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
     incoming: &tokio::sync::mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
+    tracker: TaskTracker,
+    cancel: CancellationToken,
 ) {
     let (read_half, write_half) = stream.into_split();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     connections.insert(addr, tx);
     let incoming = incoming.clone();
-    tokio::spawn(connection_reader(read_half, addr, incoming));
-    tokio::spawn(connection_writer(write_half, addr, rx));
+    tracker.spawn(connection_reader(read_half, addr, incoming, cancel.clone()));
+    tracker.spawn(connection_writer(write_half, addr, rx, cancel));
 }
 
 /// Read length-prefixed LanLink packets from the read half of a connection.
@@ -121,18 +134,24 @@ async fn connection_reader(
     mut read_half: tokio::net::tcp::OwnedReadHalf,
     from: SocketAddr,
     incoming: tokio::sync::mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
+    cancel: CancellationToken,
 ) {
     loop {
-        match read_frame(&mut read_half).await {
-            Ok(Some(frame)) => {
-                if incoming.send((from, frame)).is_err() {
-                    break;
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            frame = read_frame(&mut read_half) => {
+                match frame {
+                    Ok(Some(frame)) => {
+                        if incoming.send((from, frame)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::debug!(%from, error = %e, "TCP connection read failed");
+                        break;
+                    }
                 }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                tracing::debug!(%from, error = %e, "TCP connection read failed");
-                break;
             }
         }
     }
@@ -142,11 +161,22 @@ async fn connection_writer(
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
     addr: SocketAddr,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    cancel: CancellationToken,
 ) {
-    while let Some(packet) = rx.recv().await {
-        if let Err(e) = write_frame(&mut write_half, &packet).await {
-            tracing::debug!(%addr, error = %e, "TCP connection write failed");
-            break;
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            packet = rx.recv() => {
+                match packet {
+                    Some(packet) => {
+                        if let Err(e) = write_frame(&mut write_half, &packet).await {
+                            tracing::debug!(%addr, error = %e, "TCP connection write failed");
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
     }
 }

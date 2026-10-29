@@ -21,10 +21,10 @@ struct Args {
     #[arg(long, default_value = "http://localhost:8080")]
     coordinator: String,
 
-    /// Daemon status socket path. Defaults to auto-discovery of
-    /// /run/lanlink/lanlinkd-*.sock or /tmp/lanlinkd-*.sock.
-    #[arg(long)]
-    status_socket: Option<PathBuf>,
+    /// Daemon control/status socket path. Defaults to auto-discovery of
+    /// /run/lanlink/lanlinkd-control.sock or /tmp/lanlinkd-control.sock.
+    #[arg(long, alias = "status-socket")]
+    control_socket: Option<PathBuf>,
 }
 
 fn main() {
@@ -35,17 +35,17 @@ fn main() {
         .init();
 
     let socket_desc = args
-        .status_socket
+        .control_socket
         .as_ref()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "auto-discover in /run/lanlink or /tmp".to_string());
     tracing::info!(
         coordinator = %args.coordinator,
-        status_socket = %socket_desc,
+        control_socket = %socket_desc,
         "starting lanlink-desktop"
     );
 
-    let state = DesktopState::new(args.coordinator, args.status_socket);
+    let state = DesktopState::new(args.coordinator, args.control_socket);
 
     let app = tauri::Builder::default()
         .manage(state)
@@ -55,6 +55,8 @@ fn main() {
             commands::list_directory,
             commands::create_network,
             commands::join_network,
+            commands::disconnect_network,
+            commands::stop_daemon,
             commands::open_browser,
             commands::coordinator_status,
             commands::coordinator_start,
@@ -101,12 +103,15 @@ fn main() {
 
 fn build_tray(handle: &AppHandle) -> anyhow::Result<()> {
     let show_i = MenuItem::with_id(handle, "show", "Show LanLink", true, None::<&str>)?;
+    let disconnect_i = MenuItem::with_id(handle, "disconnect", "Disconnect", true, None::<&str>)?;
+    let stop_i = MenuItem::with_id(handle, "stop", "Stop daemon", true, None::<&str>)?;
     let quit_i = MenuItem::with_id(handle, "quit", "Quit", true, None::<&str>)?;
 
     // Some Tauri versions / platforms are sensitive to the separator type in
     // `Menu::with_items`. Use a plain menu without separators to maximize
     // compatibility.
-    let menu = Menu::with_items(handle, &[&show_i, &quit_i])?;
+    let menu = Menu::with_items(handle, &[&show_i, &disconnect_i, &stop_i, &quit_i
+    ])?;
 
     let icon = handle.default_window_icon().cloned();
     let mut builder = TrayIconBuilder::new()
@@ -124,6 +129,27 @@ fn build_tray(handle: &AppHandle) -> anyhow::Result<()> {
             tracing::info!(tray_event = %id, "tray menu activated");
             match id {
                 "show" => show_window(app),
+                "disconnect" => {
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match commands::disconnect_network(handle.state::<DesktopState>()).await {
+                            Ok(msg) => tracing::info!("{msg}"),
+                            Err(e) => tracing::warn!("disconnect failed: {e}"),
+                        }
+                    });
+                }
+                "stop" => {
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match commands::stop_daemon(handle.state::<DesktopState>()).await {
+                            Ok(msg) => {
+                                tracing::info!("{msg}");
+                                let _ = handle.exit(0);
+                            }
+                            Err(e) => tracing::warn!("stop daemon failed: {e}"),
+                        }
+                    });
+                }
                 "quit" => {
                     tracing::info!("quitting via tray menu");
                     // Use a direct process exit. Tauri's app.exit(0) can be

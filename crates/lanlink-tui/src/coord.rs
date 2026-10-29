@@ -2,12 +2,14 @@
 //! (`coord create`, `coord join`, `directory list`) using the shared
 //! `lanlink-proto` request/response types.
 
+use lanlink_proto::control::ControlRequest;
 use lanlink_proto::{
     CreateNetworkRequest, CreateNetworkResponse, JoinNetworkRequest, JoinNetworkResponse,
     PublicNetworkInfo,
 };
 use rand::RngCore;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use crate::app::Event;
@@ -24,6 +26,10 @@ pub enum Action {
         network_id: u64,
         password: String,
     },
+    /// Disconnect the running daemon from its current network.
+    DaemonDisconnect,
+    /// Gracefully stop the running daemon.
+    DaemonStop,
 }
 
 /// Result of a successful action.
@@ -31,6 +37,7 @@ pub enum Action {
 pub enum CoordOutcome {
     Created(CreateNetworkResponse),
     Joined(JoinNetworkResponse),
+    Ack,
 }
 
 /// Spawn a task that runs one action and feeds the result back into the
@@ -120,5 +127,37 @@ pub async fn run_action(
                 .await?;
             Ok(CoordOutcome::Joined(resp))
         }
+        Action::DaemonDisconnect => {
+            // The control socket path is resolved by the caller (daemon::dispatch).
+            anyhow::bail!("DaemonDisconnect must be handled by daemon::dispatch")
+        }
+        Action::DaemonStop => {
+            anyhow::bail!("DaemonStop must be handled by daemon::dispatch")
+        }
     }
+}
+
+/// Spawn a daemon control command and report the result back to the UI loop.
+/// Kept here so `coord::Action` remains the single UI action type.
+pub fn dispatch_daemon(action: Action, socket: PathBuf, tx: mpsc::Sender<Event>) {
+    tokio::spawn(async move {
+        let result = match action {
+            Action::DaemonDisconnect => {
+                crate::daemon::send_command(
+                    &socket,
+                    ControlRequest::Disconnect,
+                )
+                .await
+                .map(|_| CoordOutcome::Ack)
+            }
+            Action::DaemonStop => {
+                crate::daemon::send_command(&socket, ControlRequest::Stop)
+                    .await
+                    .map(|_| CoordOutcome::Ack)
+            }
+            _ => Err(anyhow::anyhow!("non-daemon action passed to dispatch_daemon")),
+        }
+        .map_err(|e| e.to_string());
+        let _ = tx.send(Event::Coord(action, result)).await;
+    });
 }

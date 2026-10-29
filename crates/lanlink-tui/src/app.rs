@@ -327,6 +327,16 @@ impl App {
             KeyCode::Char('s') if self.tab == Tab::Peers => {
                 self.peer_sort = self.peer_sort.next();
             }
+            KeyCode::Char('d') => {
+                if self.snapshot.as_ref().map(|s| s.status.connected).unwrap_or(false) {
+                    return vec![Action::DaemonDisconnect];
+                } else {
+                    self.show_toast("not connected", Severity::Info);
+                }
+            }
+            KeyCode::Char('x') => {
+                return vec![Action::DaemonStop];
+            }
             KeyCode::Down | KeyCode::Up if self.tab == Tab::Networks => {
                 self.focus = Focus::DirList;
             }
@@ -488,6 +498,13 @@ impl App {
                     Severity::Info,
                 );
             }
+            (Action::DaemonDisconnect, Ok(crate::coord::CoordOutcome::Ack)) => {
+                self.show_toast("disconnect requested", Severity::Info);
+            }
+            (Action::DaemonStop, Ok(crate::coord::CoordOutcome::Ack)) => {
+                self.show_toast("daemon stop requested", Severity::Info);
+                self.quit = true;
+            }
             (_, Err(error)) => {
                 self.show_toast(format!("coordinator: {error}"), Severity::Error);
             }
@@ -590,6 +607,7 @@ mod tests {
         StatusSnapshot {
             status: DaemonStatus {
                 version: "0.1.0".into(),
+                pid: 1,
                 network_id: NetworkId(1),
                 assigned_ip: VirtualIp("26.0.0.1".parse().unwrap()),
                 tap_name: "lanlink0".into(),
@@ -600,6 +618,7 @@ mod tests {
                 uptime_seconds: 10,
                 tx_bytes: tx,
                 rx_bytes: rx,
+                connected: true,
             },
             peers: vec![PeerStatus {
                 node_id: NodeId([0, 0, 0, 0, 0, 0, 0, 2]),
@@ -875,5 +894,38 @@ mod tests {
         assert_eq!(peers.len(), 2);
         assert_eq!(peers[0].latency_ms, Some(7)); // measured first
         assert_eq!(peers[1].latency_ms, None); // unmeasured last
+    }
+
+    #[test]
+    fn d_key_disconnects_from_any_tab_when_connected() {
+        let mut app = make_app();
+        app.on_event(Event::Snapshot(Ok(sample_snapshot(0, 0))));
+        app.on_event(key(KeyCode::Char('2')));
+        assert_eq!(app.tab, Tab::Peers);
+
+        let actions = app.on_event(key(KeyCode::Char('d')));
+        assert_eq!(actions, vec![Action::DaemonDisconnect]);
+    }
+
+    #[test]
+    fn d_key_toasts_when_not_connected() {
+        let mut app = make_app();
+        let actions = app.on_event(key(KeyCode::Char('d')));
+        assert!(actions.is_empty());
+        assert_eq!(
+            app.toast.as_ref().map(|t| t.message.clone()),
+            Some("not connected".into())
+        );
+    }
+
+    #[test]
+    fn x_key_stops_daemon_and_quits_after_ack() {
+        let mut app = make_app();
+        let actions = app.on_event(key(KeyCode::Char('x')));
+        assert_eq!(actions, vec![Action::DaemonStop]);
+        assert!(!app.quit);
+
+        app.on_event(Event::Coord(Action::DaemonStop, Ok(crate::coord::CoordOutcome::Ack)));
+        assert!(app.quit);
     }
 }

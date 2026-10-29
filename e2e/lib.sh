@@ -124,9 +124,23 @@ setup_bridge() {
     ip link show "$E2E_BR" >/dev/null 2>&1 || ip link add "$E2E_BR" type bridge
     ip addr add "${E2E_BR_IP}/24" dev "$E2E_BR" 2>/dev/null || true
     ip link set "$E2E_BR" up
+    # Allow traffic on the e2e bridge even when the host firewall (e.g. ufw)
+    # is active. These rules are removed in teardown_bridge.
+    for chain in INPUT FORWARD; do
+        iptables -C "$chain" -i "$E2E_BR" -j ACCEPT 2>/dev/null || iptables -I "$chain" -i "$E2E_BR" -j ACCEPT 2>/dev/null || true
+    done
+    iptables -C FORWARD -o "$E2E_BR" -j ACCEPT 2>/dev/null || iptables -I FORWARD -o "$E2E_BR" -j ACCEPT 2>/dev/null || true
 }
 
 teardown_bridge() {
+    for chain in INPUT FORWARD; do
+        while iptables -C "$chain" -i "$E2E_BR" -j ACCEPT 2>/dev/null; do
+            iptables -D "$chain" -i "$E2E_BR" -j ACCEPT 2>/dev/null || true
+        done
+    done
+    while iptables -C FORWARD -o "$E2E_BR" -j ACCEPT 2>/dev/null; do
+        iptables -D FORWARD -o "$E2E_BR" -j ACCEPT 2>/dev/null || true
+    done
     ip link del "$E2E_BR" 2>/dev/null || true
 }
 

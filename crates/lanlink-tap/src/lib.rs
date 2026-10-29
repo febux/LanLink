@@ -80,6 +80,21 @@ pub fn create_nic(config: NicConfig) -> Result<Box<dyn VirtualNic>, NicError> {
     }
 }
 
+/// Best-effort teardown of the virtual NIC created by [`create_nic`].
+/// On Linux this removes the TAP interface with `ip link del`; on other
+/// platforms the adapter/session teardown is handled by dropping the device.
+pub fn destroy_nic(name: &str) -> Result<(), NicError> {
+    #[cfg(target_os = "linux")]
+    {
+        run_ip(&["link", "del", name]).map_err(|e| NicError::Platform(e))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = name;
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Linux TAP backend
 // ---------------------------------------------------------------------------

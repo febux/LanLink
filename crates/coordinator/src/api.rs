@@ -163,6 +163,43 @@ pub async fn join_network(
     (StatusCode::OK, Json(resp)).into_response()
 }
 
+pub async fn leave_network(
+    State(state): State<Arc<AppState>>,
+    Path(network_id): Path<u64>,
+    Json(req): Json<lanlink_proto::LeaveNetworkRequest>,
+) -> impl IntoResponse {
+    if !crate::db::network_exists(&state.pool, network_id as i64)
+        .await
+        .unwrap_or(false)
+    {
+        return (StatusCode::NOT_FOUND, "network not found").into_response();
+    }
+
+    let hash = match crate::db::get_network_password_hash(&state.pool,
+        network_id as i64,
+    )
+    .await
+    {
+        Ok(Some(h)) => h,
+        Ok(None) => return (StatusCode::NOT_FOUND, "network not found").into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response(),
+    };
+
+    if !crate::db::verify_password(&req.password, &hash) {
+        return (StatusCode::UNAUTHORIZED, "invalid password").into_response();
+    }
+
+    match crate::db::delete_member(&state.pool, network_id as i64, &req.node_id.0).await {
+        Ok(true) => (StatusCode::NO_CONTENT, "")
+            .into_response(),
+        Ok(false) => (StatusCode::NOT_FOUND, "node not a member of this network").into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "leave network failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "failed to remove member").into_response()
+        }
+    }
+}
+
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     Path(network_id): Path<u64>,

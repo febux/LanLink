@@ -22,6 +22,7 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 use app::{App, Event};
+use coord::Action;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -33,21 +34,21 @@ struct Args {
     #[arg(long, default_value = "http://localhost:8080")]
     coordinator: String,
 
-    /// Daemon status socket path. Defaults to auto-discovery of
-    /// /run/lanlink/lanlinkd-*.sock or /tmp/lanlinkd-*.sock.
-    #[arg(long)]
-    status_socket: Option<PathBuf>,
+    /// Daemon control/status socket path. Defaults to auto-discovery of
+    /// /run/lanlink/lanlinkd-control.sock or /tmp/lanlinkd-control.sock.
+    #[arg(long, alias = "status-socket")]
+    control_socket: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let socket = match args.status_socket {
+    let socket = match args.control_socket {
         Some(path) => path,
         None => match daemon::discover_socket().await {
             Ok(Some(path)) => path,
-            Ok(None) => PathBuf::from("/run/lanlink/lanlinkd-0.sock"),
+            Ok(None) => PathBuf::from("/run/lanlink/lanlinkd-control.sock"),
             Err(e) => anyhow::bail!(e),
         },
     };
@@ -75,7 +76,13 @@ async fn main() -> anyhow::Result<()> {
 
     let mut app = App::new(args.coordinator.clone(), socket_desc);
 
-    let result = run_loop(&mut terminal, &mut app, event_rx, event_tx.clone()).await;
+    let result = run_loop(&mut terminal,
+        &mut app,
+        event_rx,
+        event_tx.clone(),
+        socket.clone(),
+    )
+    .await;
 
     // Terminal teardown.
     crossterm::terminal::disable_raw_mode()?;
@@ -94,6 +101,7 @@ async fn run_loop(
     app: &mut App,
     mut event_rx: mpsc::Receiver<Event>,
     event_tx: mpsc::Sender<Event>,
+    control_socket: PathBuf,
 ) -> anyhow::Result<()> {
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
@@ -103,8 +111,15 @@ async fn run_loop(
                 let Some(event) = event else { break };
                 let actions = app.on_event(event);
                 for action in actions {
-                    let base = app.coordinator.clone();
-                    coord::dispatch(action, base, event_tx.clone());
+                    match action {
+                        Action::DaemonDisconnect | Action::DaemonStop => {
+                            coord::dispatch_daemon(action.clone(), control_socket.clone(), event_tx.clone());
+                        }
+                        _ => {
+                            let base = app.coordinator.clone();
+                            coord::dispatch(action, base, event_tx.clone());
+                        }
+                    }
                 }
                 if app.quit {
                     break;

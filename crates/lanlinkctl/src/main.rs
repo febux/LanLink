@@ -3,6 +3,8 @@ use clap::{Parser, Subcommand};
 use rand::RngCore;
 use std::net::SocketAddr;
 
+mod control;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "lanlinkctl",
@@ -17,6 +19,9 @@ struct Args {
 enum Cmd {
     /// Print the client, daemon protocol, and wire versions.
     Version,
+    /// Local daemon control/status commands.
+    #[command(subcommand)]
+    Daemon(DaemonCmd),
     /// Update-channel commands (opt-in; LanLink never phones home unless asked).
     #[command(subcommand)]
     Update(UpdateCmd),
@@ -26,6 +31,60 @@ enum Cmd {
     /// Public gaming/directory server commands.
     #[command(subcommand)]
     Directory(DirectoryCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum DaemonCmd {
+    /// Print the daemon status snapshot.
+    Status {
+        #[arg(short, long)]
+        socket: Option<String>,
+        /// Output raw JSON instead of the human-readable table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Gracefully stop the daemon. Returns only after the process exits.
+    Stop {
+        #[arg(short, long)]
+        socket: Option<String>,
+        /// Maximum seconds to wait for the daemon to exit after the ack.
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+    },
+    /// Disconnect from the current network but keep the daemon running.
+    Disconnect {
+        #[arg(short, long)]
+        socket: Option<String>,
+    },
+    /// Connect the running daemon to a network.
+    Connect {
+        #[arg(short, long)]
+        socket: Option<String>,
+        #[arg(long, default_value = "http://localhost:8080")]
+        coordinator: String,
+        #[arg(short, long)]
+        network_id: u64,
+        #[arg(short, long)]
+        password: String,
+        #[arg(long, default_value = "0.0.0.0:9000")]
+        bind: SocketAddr,
+        #[arg(long, default_value = "lanlink0")]
+        tap: String,
+        #[arg(long, default_value = "1400")]
+        mtu: usize,
+        /// Comma-separated list of STUN servers (empty means disable STUN).
+        #[arg(long, value_delimiter = ',')]
+        stun_servers: Vec<String>,
+        /// Act as a gateway for the shared physical subnet.
+        #[arg(long)]
+        gateway: bool,
+        /// Physical subnet to share when gateway mode is enabled.
+        #[arg(long, default_value = "")]
+        shared_subnet: String,
+        /// Outbound physical interface used by gateway mode.
+        #[arg(long, default_value = "")]
+        phys_interface: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -104,6 +163,86 @@ async fn run(cmd: Cmd) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
 
     match cmd {
+        Cmd::Daemon(sub) => match sub {
+            DaemonCmd::Status { socket, json } => {
+                let resp = control::send_request(
+                    lanlink_proto::control::ControlRequest::Status,
+                    socket,
+                )
+                .await?;
+                match resp {
+                    lanlink_proto::control::ControlResponse::Ok {
+                        result: lanlink_proto::control::ControlResult::Status(snap),
+                    } => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&snap)?);
+                        } else {
+                            control::print_status(&snap);
+                        }
+                    }
+                    lanlink_proto::control::ControlResponse::Ok { .. } => {
+                        anyhow::bail!("unexpected status response");
+                    }
+                    lanlink_proto::control::ControlResponse::Error { error } => {
+                        anyhow::bail!("daemon error: {error}");
+                    }
+                }
+            }
+            DaemonCmd::Stop { socket, timeout } => {
+                control::stop_daemon(socket, std::time::Duration::from_secs(timeout)).await?;
+                println!("daemon stopped");
+            }
+            DaemonCmd::Disconnect { socket } => {
+                let resp = control::send_request(
+                    lanlink_proto::control::ControlRequest::Disconnect,
+                    socket,
+                )
+                .await?;
+                match resp {
+                    lanlink_proto::control::ControlResponse::Ok { .. } => {
+                        println!("disconnected");
+                    }
+                    lanlink_proto::control::ControlResponse::Error { error } => {
+                        anyhow::bail!("daemon error: {error}");
+                    }
+                }
+            }
+            DaemonCmd::Connect {
+                socket,
+                coordinator,
+                network_id,
+                password,
+                bind,
+                tap,
+                mtu,
+                stun_servers,
+                gateway,
+                shared_subnet,
+                phys_interface,
+            } => {
+                let req = lanlink_proto::control::ControlRequest::Connect {
+                    coordinator,
+                    network_id,
+                    password,
+                    bind,
+                    tap,
+                    mtu,
+                    stun_servers,
+                    gateway,
+                    shared_subnet,
+                    phys_interface,
+                };
+                let resp = control::send_request(req, socket).await?;
+                match resp {
+                    lanlink_proto::control::ControlResponse::Ok { .. } => {
+                        println!("connect requested");
+                    }
+                    lanlink_proto::control::ControlResponse::Error { error } => {
+                        anyhow::bail!("daemon error: {error}");
+                    }
+                }
+            }
+        },
         Cmd::Version => {
             println!("lanlinkctl {}", env!("CARGO_PKG_VERSION"));
             println!("protocol {}", lanlink_proto::PROTOCOL_VERSION);

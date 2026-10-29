@@ -1,34 +1,44 @@
-//! Daemon status-socket client (Unix domain socket or TCP loopback,
+//! Daemon control/status client (Unix domain socket or TCP loopback,
 //! newline-delimited JSON).
+//!
+//! The TUI now speaks the unified control/status socket introduced for
+//! disconnect/graceful-stop: it sends [`lanlink_proto::control::ControlRequest`]
+//! and receives [`lanlink_proto::control::ControlResponse`]. The legacy
+//! per-network `lanlinkd-<network_id>.sock` path is no longer used.
 
-use lanlink_proto::status::{StatusRequest, StatusResponse, StatusSnapshot};
+use lanlink_proto::control::{ControlRequest, ControlResponse, ControlResult};
+use lanlink_proto::status::StatusSnapshot;
 #[cfg(windows)]
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-/// Fetch one snapshot over the daemon's Unix status socket.
+const CONTROL_SOCKET: &str = "lanlinkd-control.sock";
+
+/// Fetch the current status snapshot from the daemon's control socket.
 #[cfg(unix)]
 pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut stream = tokio::net::UnixStream::connect(path).await?;
-    let request = serde_json::to_string(&StatusRequest::Snapshot)?;
+    let request = serde_json::to_string(&ControlRequest::Status)?;
     stream.write_all(request.as_bytes()).await?;
     stream.write_all(b"\n").await?;
-    // Half-close: the daemon processes the line and answers, then sees EOF.
     stream.shutdown().await?;
 
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
     let text = std::str::from_utf8(&buf)?;
     let line = text.lines().next().unwrap_or("");
-    match serde_json::from_str::<StatusResponse>(line)? {
-        StatusResponse::Snapshot(snapshot) => Ok(snapshot),
-        StatusResponse::Error { error } => anyhow::bail!("daemon: {error}"),
+    match serde_json::from_str::<ControlResponse>(line)? {
+        ControlResponse::Ok {
+            result: ControlResult::Status(snapshot),
+        } => Ok(snapshot),
+        ControlResponse::Ok { .. } => anyhow::bail!("unexpected control response"),
+        ControlResponse::Error { error } => anyhow::bail!("daemon: {error}"),
     }
 }
 
-/// Fetch one snapshot over the daemon's TCP loopback status socket (Windows).
+/// Fetch one snapshot over the daemon's TCP loopback control socket (Windows).
 #[cfg(windows)]
 pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,10 +46,10 @@ pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
     let addr: SocketAddr = path
         .to_str()
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| anyhow::anyhow!("invalid TCP status address: {}", path.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("invalid TCP control address: {}", path.display()))?;
 
     let mut stream = tokio::net::TcpStream::connect(addr).await?;
-    let request = serde_json::to_string(&StatusRequest::Snapshot)?;
+    let request = serde_json::to_string(&ControlRequest::Status)?;
     stream.write_all(request.as_bytes()).await?;
     stream.write_all(b"\n").await?;
     stream.shutdown().await?;
@@ -48,43 +58,73 @@ pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
     stream.read_to_end(&mut buf).await?;
     let text = std::str::from_utf8(&buf)?;
     let line = text.lines().next().unwrap_or("");
-    match serde_json::from_str::<StatusResponse>(line)? {
-        StatusResponse::Snapshot(snapshot) => Ok(snapshot),
-        StatusResponse::Error { error } => anyhow::bail!("daemon: {error}"),
+    match serde_json::from_str::<ControlResponse>(line)? {
+        ControlResponse::Ok {
+            result: ControlResult::Status(snapshot),
+        } => Ok(snapshot),
+        ControlResponse::Ok { .. } => anyhow::bail!("unexpected control response"),
+        ControlResponse::Error { error } => anyhow::bail!("daemon: {error}"),
     }
 }
 
-/// Find a listening daemon socket when `--status-socket` was not given.
+/// Send a control command and return the daemon's response.
+#[cfg(unix)]
+pub async fn send_command(path: &Path, req: ControlRequest) -> anyhow::Result<ControlResponse> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::UnixStream::connect(path).await?;
+    let request = serde_json::to_string(&req)?;
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(b"\n").await?;
+    stream.shutdown().await?;
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let text = std::str::from_utf8(&buf)?;
+    let line = text.lines().next().unwrap_or("");
+    serde_json::from_str::<ControlResponse>(line)
+        .map_err(|e| anyhow::anyhow!("invalid control response: {e}"))
+}
+
+#[cfg(windows)]
+pub async fn send_command(path: &Path, req: ControlRequest) -> anyhow::Result<ControlResponse> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let addr: SocketAddr = path
+        .to_str()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("invalid TCP control address: {}", path.display()))?;
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await?;
+    let request = serde_json::to_string(&req)?;
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(b"\n").await?;
+    stream.shutdown().await?;
+
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    let text = std::str::from_utf8(&buf)?;
+    let line = text.lines().next().unwrap_or("");
+    serde_json::from_str::<ControlResponse>(line)
+        .map_err(|e| anyhow::anyhow!("invalid control response: {e}"))
+}
+
+/// Find the listening daemon control socket when `--control-socket` is not given.
 #[cfg(unix)]
 pub async fn discover_socket() -> Result<Option<PathBuf>, String> {
     const DIRS: &[&str] = &["/run/lanlink", "/tmp"];
-    let mut candidates: Vec<PathBuf> = Vec::new();
     for dir in DIRS {
-        match std::fs::read_dir(dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("lanlinkd-") && name.ends_with(".sock") {
-                        candidates.push(entry.path());
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                return Err(format!(
-                    "permission denied reading {dir}: add your user to the 'lanlink' group with \"sudo usermod -aG lanlink $USER\", then log out and back in (or run \"newgrp lanlink\" in this shell)"
-                ));
-            }
-            Err(_) => {}
-        }
-    }
-    candidates.sort();
-    for path in candidates {
+        let path = PathBuf::from(dir).join(CONTROL_SOCKET);
         if probe(&path).await {
             return Ok(Some(path));
         }
     }
     Ok(None)
+}
+
+#[cfg(unix)]
+async fn probe(path: &Path) -> bool {
+    tokio::net::UnixStream::connect(path).await.is_ok()
 }
 
 /// Path of the live daemon config written by the MSI / `service up`
@@ -93,9 +133,9 @@ pub async fn discover_socket() -> Result<Option<PathBuf>, String> {
 const DAEMON_CONFIG: &str = "C:\\Program Files\\LanLink\\lanlinkd.toml";
 
 /// Read the configured `[status] socket` from the daemon config, if the
-/// config exists and parses.
+/// config exists and parses. The control/status socket reuses that config key.
 #[cfg(windows)]
-fn configured_status_socket() -> Option<String> {
+fn configured_control_socket() -> Option<String> {
     #[derive(serde::Deserialize, Default)]
     struct Probe {
         #[serde(default)]
@@ -110,30 +150,21 @@ fn configured_status_socket() -> Option<String> {
     probe.status.socket
 }
 
-/// Find a listening daemon TCP status socket on Windows.
+/// Find a listening daemon TCP control socket on Windows.
 #[cfg(windows)]
 pub async fn discover_socket() -> Result<Option<PathBuf>, String> {
-    // The daemon config is authoritative when it names a status socket.
-    if let Some(configured) = configured_status_socket() {
+    if let Some(configured) = configured_control_socket() {
         if let Ok(addr) = configured.parse::<SocketAddr>() {
             if tokio::net::TcpStream::connect(addr).await.is_ok() {
                 return Ok(Some(PathBuf::from(addr.to_string())));
             }
         }
     }
-    // Default layout: port = 9000 + network_id, ids 1..=32.
-    for network_id in 1u64..=32 {
-        let addr = SocketAddr::from(([127, 0, 0, 1], (9000u16 + network_id as u16)));
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            return Ok(Some(PathBuf::from(addr.to_string())));
-        }
+    let addr = SocketAddr::from(([127, 0, 0, 1], 19000));
+    if tokio::net::TcpStream::connect(addr).await.is_ok() {
+        return Ok(Some(PathBuf::from(addr.to_string())));
     }
     Ok(None)
-}
-
-#[cfg(unix)]
-async fn probe(path: &Path) -> bool {
-    tokio::net::UnixStream::connect(path).await.is_ok()
 }
 
 #[cfg(windows)]
@@ -152,6 +183,7 @@ mod tests {
         StatusSnapshot {
             status: DaemonStatus {
                 version: "0.1.0-test".into(),
+                pid: 1234,
                 network_id: NetworkId(42),
                 assigned_ip: VirtualIp("26.0.0.9".parse().unwrap()),
                 tap_name: "lanlink0".into(),
@@ -162,6 +194,7 @@ mod tests {
                 uptime_seconds: 99,
                 tx_bytes: 111,
                 rx_bytes: 222,
+                connected: true,
             },
             peers: vec![PeerStatus {
                 node_id: NodeId([7; 8]),
@@ -196,14 +229,17 @@ mod tests {
 
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let snapshot = canned_snapshot();
-        let canned = serde_json::to_string(&StatusResponse::Snapshot(snapshot)).unwrap();
+        let canned = serde_json::to_string(&ControlResponse::Ok {
+            result: ControlResult::Status(snapshot),
+        })
+        .unwrap();
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut reader = BufReader::new(stream);
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
-            assert!(line.contains("snapshot"), "request was {line:?}");
+            assert!(line.contains("\"cmd\":\"status\""), "request was {line:?}");
             let reply = reader.get_mut();
             reply.write_all(canned.as_bytes()).await.unwrap();
             reply.write_all(b"\n").await.unwrap();
@@ -212,6 +248,7 @@ mod tests {
         let result = fetch_snapshot(&path).await.expect("fetch");
         assert_eq!(result.status.network_id.0, 42);
         assert_eq!(result.status.version, "0.1.0-test");
+        assert_eq!(result.status.connected, true);
         assert_eq!(result.peers.len(), 1);
         assert_eq!(result.peers[0].latency_ms, Some(23));
         assert_eq!(result.peers[0].path, PathKind::Direct);
@@ -260,7 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_socket_fails_cleanly() {
-        let err = fetch_snapshot(Path::new("/nonexistent/lanlinkd-0.sock"))
+        let err = fetch_snapshot(Path::new("/nonexistent/lanlinkd-control.sock"))
             .await
             .expect_err("must fail");
         assert!(!err.to_string().is_empty());

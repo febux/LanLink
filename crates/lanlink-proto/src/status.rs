@@ -55,6 +55,8 @@ impl std::fmt::Display for PathKind {
 pub struct DaemonStatus {
     /// Daemon build version.
     pub version: String,
+    /// Operating-system process id of the daemon (useful for `daemon stop`).
+    pub pid: u32,
     pub network_id: NetworkId,
     pub assigned_ip: VirtualIp,
     /// Virtual NIC (TAP/Wintun/utun) interface name.
@@ -73,6 +75,8 @@ pub struct DaemonStatus {
     pub tx_bytes: u64,
     /// Total received bytes on the data plane.
     pub rx_bytes: u64,
+    /// Whether the daemon currently has an active network session.
+    pub connected: bool,
 }
 
 /// Status of a single peer as seen by the daemon.
@@ -121,6 +125,7 @@ mod tests {
         let snap = StatusSnapshot {
             status: DaemonStatus {
                 version: "0.1.0".into(),
+                pid: std::process::id(),
                 network_id: NetworkId(7),
                 assigned_ip: VirtualIp("26.0.0.5".parse().unwrap()),
                 tap_name: "lanlink0".into(),
@@ -131,6 +136,7 @@ mod tests {
                 uptime_seconds: 42,
                 tx_bytes: 1234,
                 rx_bytes: 5678,
+                connected: true,
             },
             peers: vec![PeerStatus {
                 node_id: NodeId([1; 8]),

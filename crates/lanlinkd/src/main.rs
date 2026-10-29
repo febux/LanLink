@@ -1,4 +1,5 @@
 mod config;
+mod control;
 mod sdnotify;
 mod service;
 mod status;
@@ -12,6 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 /// Global shutdown signal. Triggered by SIGINT/SIGTERM (unix), Ctrl-C
 /// (Windows console) or the Windows service control handler.
@@ -318,8 +322,6 @@ async fn main() {
                 tap,
                 mtu,
                 stun_servers,
-                // The flag can only turn gateway mode on; when absent the
-                // config file value applies.
                 gateway: gateway.then_some(true),
                 shared_subnet,
                 phys_interface,
@@ -330,7 +332,10 @@ async fn main() {
                 None => config::resolve(&config::FileConfig::default(), &cli),
             };
             match cfg {
-                Ok(cfg) => run_coordinated(cfg).await,
+                Ok(cfg) => {
+                    let control_socket = cfg.status_socket.clone();
+                    run_daemon_runtime(cfg, control_socket).await
+                }
                 Err(e) => Err(anyhow::anyhow!("configuration error: {e}")),
             }
         }
@@ -355,11 +360,11 @@ async fn main() {
                         bind,
                         tap,
                         mtu,
-                        status_socket,
+                        status_socket.clone(),
                     )
                     .await
                     {
-                        Ok(cfg) => run_coordinated(cfg).await,
+                        Ok(cfg) => run_daemon_runtime(cfg, status_socket).await,
                         Err(e) => Err(e),
                     }
                 }
@@ -377,12 +382,210 @@ async fn main() {
     }
 }
 
-/// Load a config file and run the daemon (used by `service run`).
+/// Load a config file and run the persistent daemon runtime (used by `service run`).
 pub async fn run_from_config_path(path: &str) -> anyhow::Result<()> {
     spawn_os_signal_handlers();
     let cfg = config::load(path, &config::CliOverrides::default())
         .map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
-    run_coordinated(cfg).await
+    let control_socket = cfg.status_socket.clone();
+    run_daemon_runtime(cfg, control_socket).await
+}
+
+/// Persistent daemon runtime: one control/status socket, optional network session,
+/// supports disconnect/reconnect/stop without a process restart.
+async fn run_daemon_runtime(
+    initial_cfg: config::RunConfig,
+    control_socket: Option<String>,
+) -> anyhow::Result<()> {
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<control::ControlEnvelope>(8);
+    let empty_state = control::empty_state();
+    let (state_tx, state_rx) = tokio::sync::watch::channel(empty_state);
+
+    control::spawn_server(control_socket, state_rx, cmd_tx).await;
+
+    let mut session_cancel: Option<CancellationToken> = None;
+    let mut session_handle: Option<tokio::task::JoinHandle<()>> = None;
+
+    // Auto-connect using the CLI/config-provided network on startup.
+    start_session(initial_cfg, &mut session_cancel, &mut session_handle, &state_tx);
+
+    loop {
+        tokio::select! {
+            _ = shutdown().wait() => {
+                tracing::info!("shutdown requested; stopping active session");
+                stop_session(session_cancel, session_handle).await;
+                break;
+            }
+            envelope = cmd_rx.recv() => {
+                match envelope {
+                    Some(env) => {
+                        handle_control_envelope(
+                            env,
+                            &mut session_cancel,
+                            &mut session_handle,
+                            &state_tx,
+                        )
+                        .await;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    tracing::info!("daemon runtime exiting");
+    Ok(())
+}
+
+fn start_session(
+    cfg: config::RunConfig,
+    session_cancel: &mut Option<CancellationToken>,
+    session_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    state_tx: &control::StateTx,
+) {
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let state_tx = state_tx.clone();
+    let task = tokio::spawn(async move {
+        if let Err(e) = run_coordinated(cfg, state_tx, task_cancel).await {
+            tracing::error!(error = %e, "network session ended");
+        }
+    });
+    *session_cancel = Some(cancel);
+    *session_handle = Some(task);
+}
+
+async fn stop_session(
+    session_cancel: Option<CancellationToken>,
+    session_handle: Option<tokio::task::JoinHandle<()>>,
+) {
+    if let Some(c) = session_cancel {
+        c.cancel();
+    }
+    if let Some(h) = session_handle {
+        let _ = h.await;
+    }
+}
+
+async fn handle_control_envelope(
+    envelope: control::ControlEnvelope,
+    session_cancel: &mut Option<CancellationToken>,
+    session_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    state_tx: &control::StateTx,
+) {
+    use lanlink_proto::control::ControlResponse;
+
+    match envelope.req {
+        lanlink_proto::control::ControlRequest::Status => {
+            let state = state_tx.borrow().clone();
+            let snap = state.snapshot().await;
+            let _ = envelope
+                .resp
+                .send(ControlResponse::Ok { result: lanlink_proto::control::ControlResult::Status(snap) });
+        }
+        lanlink_proto::control::ControlRequest::Connect {
+            coordinator,
+            network_id,
+            password,
+            bind,
+            tap,
+            mtu,
+            stun_servers,
+            gateway,
+            shared_subnet,
+            phys_interface,
+        } => {
+            if session_handle.is_some() {
+                let _ = envelope.resp.send(ControlResponse::Error {
+                    error: "already connected".into(),
+                });
+                return;
+            }
+            let cfg = match build_run_config(
+                coordinator,
+                network_id,
+                password,
+                bind,
+                tap,
+                mtu,
+                stun_servers,
+                gateway,
+                shared_subnet,
+                phys_interface,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = envelope.resp.send(ControlResponse::Error {
+                        error: format!("invalid connect config: {e}"),
+                    });
+                    return;
+                }
+            };
+            start_session(cfg, session_cancel, session_handle, state_tx);
+            let _ = envelope.resp.send(ControlResponse::Ok {
+                result: lanlink_proto::control::ControlResult::Ack,
+            });
+        }
+        lanlink_proto::control::ControlRequest::Disconnect => {
+            if session_handle.is_none() {
+                let _ = envelope.resp.send(ControlResponse::Ok {
+                    result: lanlink_proto::control::ControlResult::Ack,
+                });
+                return;
+            }
+            let cancel = session_cancel.take().unwrap();
+            let handle = session_handle.take().unwrap();
+            cancel.cancel();
+            let _ = handle.await;
+            let _ = envelope.resp.send(ControlResponse::Ok {
+                result: lanlink_proto::control::ControlResult::Ack,
+            });
+        }
+        lanlink_proto::control::ControlRequest::Stop => {
+            let _ = envelope.resp.send(ControlResponse::Ok {
+                result: lanlink_proto::control::ControlResult::Ack,
+            });
+            shutdown().trigger();
+            let cancel = session_cancel.take();
+            let handle = session_handle.take();
+            if let Some(c) = cancel {
+                c.cancel();
+            }
+            if let Some(h) = handle {
+                let _ = h.await;
+            }
+        }
+    }
+}
+
+fn build_run_config(
+    coordinator: String,
+    network_id: u64,
+    password: String,
+    bind: std::net::SocketAddr,
+    tap: String,
+    mtu: usize,
+    stun_servers: Vec<String>,
+    gateway: bool,
+    shared_subnet: String,
+    phys_interface: String,
+) -> anyhow::Result<config::RunConfig> {
+    let file = config::FileConfig::default();
+    let cli = config::CliOverrides {
+        coordinator: Some(coordinator),
+        network_id: Some(network_id),
+        password: Some(password),
+        bind: Some(bind),
+        tap: Some(tap),
+        mtu: Some(mtu),
+        stun_servers: Some(stun_servers),
+        gateway: Some(gateway),
+        shared_subnet: Some(shared_subnet).filter(|s| !s.is_empty()),
+        phys_interface: Some(phys_interface).filter(|s| !s.is_empty()),
+        status_socket: None,
+    };
+    config::resolve(&file, &cli)
+        .map_err(|e| anyhow::anyhow!("configuration error: {e}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -433,7 +636,11 @@ async fn run_static_peer(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
+async fn run_coordinated(
+    cfg: config::RunConfig,
+    state_tx: control::StateTx,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
     let config::RunConfig {
         coordinator,
         network_id,
@@ -447,7 +654,7 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
         phys_interface,
         update,
         telemetry,
-        status_socket,
+        status_socket: _,
     } = cfg;
 
     let client = reqwest::Client::new();
@@ -460,10 +667,15 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
 
     let shared_subnet = shared_subnet.unwrap_or_default();
 
+    // Track every background task spawned by this session. After the session
+    // is cancelled we wait for all of them to finish so that sockets and TAP
+    // devices are released before a reconnect re-binds the same ports.
+    let tracker = TaskTracker::new();
+
     // Bind the TCP listener early so we can advertise its address in the join
     // request. The UDP and TCP sockets can share the same port on Linux.
     let (tcp_in_tx, tcp_in_rx) = tokio::sync::mpsc::unbounded_channel::<(SocketAddr, Vec<u8>)>();
-    let (tcp_transport, tcp_addr) = tcp::TcpTransport::bind(bind, tcp_in_tx).await?;
+    let (tcp_transport, tcp_addr) = tcp::TcpTransport::bind(bind, tcp_in_tx, &tracker, cancel.clone()).await?;
     let tcp_candidates = lanlink_punch::gather_host_candidates(tcp_addr.port());
 
     let initial_candidates = lanlink_punch::gather_host_candidates(bind.port());
@@ -578,13 +790,18 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
     if let Some(addr) = local_relay {
         tracing::info!(%addr, "bound to UDP relay server");
         let socket_kp = socket.clone();
-        tokio::spawn(async move {
+        let relay_cancel = cancel.clone();
+        tracker.spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(25));
             loop {
-                interval.tick().await;
-                let bind = lanlink_relay::encode_bind(local);
-                if let Err(e) = socket_kp.send_to(&bind, addr).await {
-                    tracing::debug!(%addr, error = %e, "UDP relay keepalive failed");
+                tokio::select! {
+                    _ = relay_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let bind = lanlink_relay::encode_bind(local);
+                        if let Err(e) = socket_kp.send_to(&bind, addr).await {
+                            tracing::debug!(%addr, error = %e, "UDP relay keepalive failed");
+                        }
+                    }
                 }
             }
         });
@@ -600,12 +817,17 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
         let bind = lanlink_relay::encode_bind(local);
         tcp_transport.send(addr, bind);
         let tcp_kp = tcp_transport.clone();
-        tokio::spawn(async move {
+        let tcp_relay_cancel = cancel.clone();
+        tracker.spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(25));
             loop {
-                interval.tick().await;
-                let bind = lanlink_relay::encode_bind(local);
-                tcp_kp.send(addr, bind);
+                tokio::select! {
+                    _ = tcp_relay_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let bind = lanlink_relay::encode_bind(local);
+                        tcp_kp.send(addr, bind);
+                    }
+                }
             }
         });
     }
@@ -620,9 +842,7 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
 
     let punching: Arc<Mutex<HashSet<lanlink_proto::NodeId>>> = Arc::new(Mutex::new(HashSet::new()));
 
-    // Local status API: a read-only snapshot socket for frontends. Registry
-    // state is written here and by the refresh loop below; the server itself
-    // never blocks the data plane.
+    // Publish the live session state to the persistent control/status socket.
     let registry = status::StatusRegistry::new();
     registry.set_info(status::DaemonInfo {
         network_id,
@@ -635,18 +855,14 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
         relay_servers: resp.relay_servers.clone(),
     });
     registry.update_peers(&resp.peers);
-    status::spawn_server(
-        status_socket,
-        network_id,
-        status::StatusState {
-            registry: registry.clone(),
-            switch: switch.clone(),
-            metrics: metrics.clone(),
-            punching: punching.clone(),
-            start: start_time,
-        },
-    )
-    .await;
+    let session_state = status::StatusState {
+        registry: registry.clone(),
+        switch: switch.clone(),
+        metrics: metrics.clone(),
+        punching: punching.clone(),
+        start: start_time,
+    };
+    let _ = state_tx.send_replace(session_state);
 
     // Kick off NAT traversal for the initial peer list.
     punch_peers(
@@ -659,6 +875,8 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
         punching.clone(),
         tcp_transport.clone(),
         resp.peers,
+        &tracker,
+        cancel.clone(),
     )
     .await;
 
@@ -673,32 +891,40 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
     let local_relay_for_refresh = local_relay;
     let local_tcp_relay_for_refresh = local_tcp_relay;
     let refresh_tcp = tcp_transport.clone();
-    tokio::spawn(async move {
+    let refresh_tracker = tracker.clone();
+    let refresh_cancel = cancel.clone();
+    tracker.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
-            interval.tick().await;
-            if let Ok(peers) = refresh_candidates_and_punch(
-                &refresh_coordinator,
-                network_id,
-                local,
-                &refresh_client,
-                &refresh_puncher,
-                &refresh_switch,
-                &refresh_punching,
-                local_relay_for_refresh,
-                tcp_addr,
-                local_tcp_relay_for_refresh,
-                refresh_tcp.clone(),
-            )
-            .await
-            {
-                refresh_registry.update_peers(&peers);
-                let routes = lanlink_gateway::gateway_routes(&peers);
-                if let Err(e) = refresh_route_manager.sync_routes(&routes).await {
-                    tracing::warn!(error = %e, "failed to sync gateway routes");
+            tokio::select! {
+                _ = refresh_cancel.cancelled() => break,
+                _ = interval.tick() => {
+                    if let Ok(peers) = refresh_candidates_and_punch(
+                        &refresh_coordinator,
+                        network_id,
+                        local,
+                        &refresh_client,
+                        &refresh_puncher,
+                        &refresh_switch,
+                        &refresh_punching,
+                        local_relay_for_refresh,
+                        tcp_addr,
+                        local_tcp_relay_for_refresh,
+                        refresh_tcp.clone(),
+                        &refresh_tracker,
+                        refresh_cancel.clone(),
+                    )
+                    .await
+                    {
+                        refresh_registry.update_peers(&peers);
+                        let routes = lanlink_gateway::gateway_routes(&peers);
+                        if let Err(e) = refresh_route_manager.sync_routes(&routes).await {
+                            tracing::warn!(error = %e, "failed to sync gateway routes");
+                        }
+                    } else {
+                        tracing::warn!("candidate refresh failed");
+                    }
                 }
-            } else {
-                tracing::warn!("candidate refresh failed");
             }
         }
     });
@@ -715,31 +941,36 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
         let switch_for_telemetry = switch.clone();
         let metrics_for_telemetry = metrics.clone();
         let firewall_enabled = resp.is_public;
-        tokio::spawn(async move {
+        let telemetry_cancel = cancel.clone();
+        tracker.spawn(async move {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()
                 .expect("failed to build telemetry client");
             let mut ticker = tokio::time::interval(interval);
             loop {
-                ticker.tick().await;
-                let report = build_telemetry_report(
-                    &start_time,
-                    &metrics_for_telemetry,
-                    &switch_for_telemetry,
-                    gateway,
-                    firewall_enabled,
-                    &relay_servers,
-                );
-                match client.post(&endpoint).json(&report).send().await {
-                    Ok(r) => {
-                        if r.status().is_success() {
-                            tracing::debug!("telemetry report submitted");
-                        } else {
-                            tracing::debug!(status = %r.status(), "telemetry submission rejected");
+                tokio::select! {
+                    _ = telemetry_cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        let report = build_telemetry_report(
+                            &start_time,
+                            &metrics_for_telemetry,
+                            &switch_for_telemetry,
+                            gateway,
+                            firewall_enabled,
+                            &relay_servers,
+                        );
+                        match client.post(&endpoint).json(&report).send().await {
+                            Ok(r) => {
+                                if r.status().is_success() {
+                                    tracing::debug!("telemetry report submitted");
+                                } else {
+                                    tracing::debug!(status = %r.status(), "telemetry submission rejected");
+                                }
+                            }
+                            Err(e) => tracing::debug!(error = %e, "telemetry submission failed"),
                         }
                     }
-                    Err(e) => tracing::debug!(error = %e, "telemetry submission failed"),
                 }
             }
         });
@@ -751,7 +982,8 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
     if update.enabled {
         let manifest_url = update.manifest.clone();
         let interval = update.interval;
-        tokio::spawn(async move {
+        let update_cancel = cancel.clone();
+        tracker.spawn(async move {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(15))
                 .build()
@@ -759,47 +991,51 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
             let mut notified: Option<String> = None;
             let mut ticker = tokio::time::interval(interval);
             loop {
-                ticker.tick().await;
-                match client
-                    .get(&manifest_url)
-                    .send()
-                    .await
-                    .and_then(|r| r.error_for_status())
-                {
-                    Ok(resp) => match resp.json::<lanlink_proto::update::UpdateManifest>().await {
-                        Ok(m) => {
-                            if let lanlink_proto::update::UpdateCheck::Available {
-                                latest, ..
-                            } =
-                                lanlink_proto::update::check_manifest(&m, env!("CARGO_PKG_VERSION"))
-                            {
-                                if notified.as_deref() != Some(latest.to_string().as_str()) {
-                                    tracing::info!(
-                                        running = env!("CARGO_PKG_VERSION"),
-                                        latest = %latest,
-                                        "update available on the release channel"
-                                    );
-                                    notified = Some(latest.to_string());
+                tokio::select! {
+                    _ = update_cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        match client
+                            .get(&manifest_url)
+                            .send()
+                            .await
+                            .and_then(|r| r.error_for_status())
+                        {
+                            Ok(resp) => match resp.json::<lanlink_proto::update::UpdateManifest>().await {
+                                Ok(m) => {
+                                    if let lanlink_proto::update::UpdateCheck::Available {
+                                        latest, ..
+                                    } =
+                                        lanlink_proto::update::check_manifest(&m, env!("CARGO_PKG_VERSION"))
+                                    {
+                                        if notified.as_deref() != Some(latest.to_string().as_str()) {
+                                            tracing::info!(
+                                                running = env!("CARGO_PKG_VERSION"),
+                                                latest = %latest,
+                                                "update available on the release channel"
+                                            );
+                                            notified = Some(latest.to_string());
+                                        }
+                                    }
                                 }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "update manifest parse failed")
+                                }
+                            },
+                            Err(e) => {
+                                tracing::debug!(error = %e, "update check failed")
                             }
                         }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "update manifest parse failed")
-                        }
-                    },
-                    Err(e) => {
-                        tracing::debug!(error = %e, "update check failed")
                     }
                 }
             }
         });
     }
 
-    // Tell the service manager we are up, then run until shutdown.
+    // Tell the service manager we are up, then run until shutdown or disconnect.
     sdnotify::notify_ready();
     let watchdog = sdnotify::spawn_watchdog();
     let pump_result = start_coordinated_pump(
-        nic,
+        nic.clone(),
         switch,
         socket,
         tcp_transport,
@@ -809,12 +1045,29 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
         gateway_manager.clone(),
         metrics,
         mtu,
+        cancel.clone(),
     )
     .await;
 
-    // ---- Graceful shutdown cleanup -------------------------------------
+    // Wait for all background tasks (TCP transport, relay keepalives, refresh,
+    // telemetry, update, punching) to finish so their sockets are released
+    // before the next reconnect re-binds the same ports.
+    tracker.close();
+    tracker.wait().await;
+
+    // Best-effort leave notification before cleanup.
+    send_leave_notification(&client,
+        &coordinator,
+        network_id,
+        local,
+        &password,
+    )
+    .await;
+
+    // ---- Graceful shutdown/disconnect cleanup ---------------------------
     // Undo everything that persists beyond the process (firewall table,
-    // MASQUERADE rule, pushed routes) so no state leaks across restarts.
+    // MASQUERADE rule, pushed routes, TAP device) so no state leaks across
+    // restarts and a later reconnect is clean.
     sdnotify::notify_stopping();
     if let Some(watchdog) = watchdog {
         watchdog.abort();
@@ -832,9 +1085,43 @@ async fn run_coordinated(cfg: config::RunConfig) -> anyhow::Result<()> {
     if let Err(e) = route_manager.sync_routes(&[]).await {
         tracing::warn!(error = %e, "failed to remove routes on shutdown");
     }
-    tracing::info!("shutdown complete");
+    // Drop the TAP device explicitly so the interface/IP are released before
+    // the daemon reports itself as disconnected. `destroy_nic` is best-effort.
+    drop(nic);
+    if let Err(e) = lanlink_tap::destroy_nic(&tap_name) {
+        tracing::debug!(error = %e, tap = %tap_name, "TAP destroy failed or unnecessary");
+    }
+
+    // Publish the empty/disconnected state to the control/status socket.
+    let _ = state_tx.send_replace(control::empty_state());
+    tracing::info!("session cleanup complete");
 
     pump_result
+}
+
+async fn send_leave_notification(
+    client: &reqwest::Client,
+    coordinator: &str,
+    network_id: u64,
+    node_id: lanlink_proto::NodeId,
+    password: &str,
+) {
+    let req = lanlink_proto::LeaveNetworkRequest {
+        password: password.to_string(),
+        node_id,
+    };
+    let url = format!("{}/networks/{}/leave", coordinator, network_id);
+    match client.post(&url).json(&req).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!("notified coordinator of network leave");
+        }
+        Ok(resp) => {
+            tracing::debug!(status = %resp.status(), "coordinator leave notification rejected");
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "coordinator leave notification failed");
+        }
+    }
 }
 
 /// Attempt to bind the local node to one of the network relay servers.
@@ -896,6 +1183,8 @@ async fn refresh_candidates_and_punch(
     local_tcp_addr: SocketAddr,
     local_tcp_relay: Option<SocketAddr>,
     tcp_transport: tcp::TcpTransport,
+    tracker: &TaskTracker,
+    cancel: CancellationToken,
 ) -> anyhow::Result<Vec<lanlink_proto::PeerInfo>> {
     let mut candidates = puncher.gather_candidates().await;
     if let Some(relay) = local_relay {
@@ -945,6 +1234,8 @@ async fn refresh_candidates_and_punch(
         punching.clone(),
         tcp_transport,
         peers.clone(),
+        tracker,
+        cancel,
     )
     .await;
     Ok(peers)
@@ -962,6 +1253,8 @@ async fn punch_peers(
     punching: Arc<Mutex<HashSet<lanlink_proto::NodeId>>>,
     tcp_transport: tcp::TcpTransport,
     peers: Vec<lanlink_proto::PeerInfo>,
+    tracker: &TaskTracker,
+    cancel: CancellationToken,
 ) {
     for peer in peers {
         if peer.node_id == local_node {
@@ -986,69 +1279,75 @@ async fn punch_peers(
         let relay_candidates = peer.relay_candidates.clone();
         let tcp_candidates = peer.tcp_candidates.clone();
         let tcp_relay_candidates = peer.tcp_relay_candidates.clone();
+        let punch_cancel = cancel.clone();
 
-        tokio::spawn(async move {
-            tracing::info!(?peer_id, "starting hole punch");
-            let candidates_with_kind: Vec<lanlink_punch::Candidate> = direct_candidates
-                .into_iter()
-                .map(|addr| lanlink_punch::Candidate {
-                    addr,
-                    kind: lanlink_punch::CandidateKind::Host,
-                })
-                .collect();
+        tracker.spawn(async move {
+            tokio::select! {
+                _ = punch_cancel.cancelled() => {}
+                _ = async {
+                    tracing::info!(?peer_id, "starting hole punch");
+                    let candidates_with_kind: Vec<lanlink_punch::Candidate> = direct_candidates
+                        .into_iter()
+                        .map(|addr| lanlink_punch::Candidate {
+                            addr,
+                            kind: lanlink_punch::CandidateKind::Host,
+                        })
+                        .collect();
 
-            match puncher.punch_peer(peer_id, candidates_with_kind).await {
-                Ok(path) => {
-                    tracing::info!(?peer_id, addr = %path.addr, "direct path verified");
-                    switch.lock().await.set_peer_addr(peer_id, path.addr);
-                }
-                Err(e) => {
-                    tracing::warn!(?peer_id, error = %e, "direct punch failed");
-                    // Refresh candidates from the coordinator once more in case
-                    // the peer updated its reflexive address while we were punching.
-                    if let Err(e2) = refresh_single_peer_candidates(
-                        &coordinator,
-                        network_id,
-                        local_node,
-                        &client,
-                        &puncher,
-                        &switch,
-                        peer_id,
-                    )
-                    .await
-                    {
-                        tracing::debug!(?peer_id, error = %e2, "single peer candidate refresh failed");
+                    match puncher.punch_peer(peer_id, candidates_with_kind).await {
+                        Ok(path) => {
+                            tracing::info!(?peer_id, addr = %path.addr, "direct path verified");
+                            switch.lock().await.set_peer_addr(peer_id, path.addr);
+                        }
+                        Err(e) => {
+                            tracing::warn!(?peer_id, error = %e, "direct punch failed");
+                            // Refresh candidates from the coordinator once more in case
+                            // the peer updated its reflexive address while we were punching.
+                            if let Err(e2) = refresh_single_peer_candidates(
+                                &coordinator,
+                                network_id,
+                                local_node,
+                                &client,
+                                &puncher,
+                                &switch,
+                                peer_id,
+                            )
+                            .await
+                            {
+                                tracing::debug!(?peer_id, error = %e2, "single peer candidate refresh failed");
+                            }
+
+                            // Fallback ordering: direct paths (UDP then TCP) are
+                            // preferred over relay paths (UDP then TCP). Traffic stays
+                            // E2E-encrypted on every path.
+                            if let Some(tcp_addr) = tcp_candidates.first() {
+                                tracing::info!(?peer_id, %tcp_addr, "falling back to TCP direct path");
+                                tcp_transport.connect(*tcp_addr);
+                                {
+                                    let mut sw = switch.lock().await;
+                                    sw.set_peer_addr(peer_id, *tcp_addr);
+                                    sw.set_peer_transport(peer_id, lanlink_switch::Transport::TcpDirect);
+                                }
+                            } else if let Some(relay_addr) = relay_candidates.first() {
+                                tracing::info!(?peer_id, %relay_addr, "falling back to UDP relay path");
+                                switch.lock().await.set_peer_addr(peer_id, *relay_addr);
+                            } else if let Some(tcp_relay) = tcp_relay_candidates.first() {
+                                tracing::info!(?peer_id, %tcp_relay, "falling back to TCP relay path");
+                                tcp_transport.connect(*tcp_relay);
+                                let bind = lanlink_relay::encode_bind(local_node);
+                                tcp_transport.send(*tcp_relay, bind);
+                                {
+                                    let mut sw = switch.lock().await;
+                                    sw.set_peer_addr(peer_id, *tcp_relay);
+                                    sw.set_peer_transport(peer_id, lanlink_switch::Transport::TcpRelay);
+                                }
+                            }
+                        }
                     }
 
-                    // Fallback ordering: direct paths (UDP then TCP) are
-                    // preferred over relay paths (UDP then TCP). Traffic stays
-                    // E2E-encrypted on every path.
-                    if let Some(tcp_addr) = tcp_candidates.first() {
-                        tracing::info!(?peer_id, %tcp_addr, "falling back to TCP direct path");
-                        tcp_transport.connect(*tcp_addr);
-                        {
-                            let mut sw = switch.lock().await;
-                            sw.set_peer_addr(peer_id, *tcp_addr);
-                            sw.set_peer_transport(peer_id, lanlink_switch::Transport::TcpDirect);
-                        }
-                    } else if let Some(relay_addr) = relay_candidates.first() {
-                        tracing::info!(?peer_id, %relay_addr, "falling back to UDP relay path");
-                        switch.lock().await.set_peer_addr(peer_id, *relay_addr);
-                    } else if let Some(tcp_relay) = tcp_relay_candidates.first() {
-                        tracing::info!(?peer_id, %tcp_relay, "falling back to TCP relay path");
-                        tcp_transport.connect(*tcp_relay);
-                        let bind = lanlink_relay::encode_bind(local_node);
-                        tcp_transport.send(*tcp_relay, bind);
-                        {
-                            let mut sw = switch.lock().await;
-                            sw.set_peer_addr(peer_id, *tcp_relay);
-                            sw.set_peer_transport(peer_id, lanlink_switch::Transport::TcpRelay);
-                        }
-                    }
-                }
+                    punching.lock().await.remove(&peer_id);
+                } => {}
             }
-
-            punching.lock().await.remove(&peer_id);
         });
     }
 }
@@ -1120,14 +1419,17 @@ async fn start_coordinated_pump(
     gateway_manager: Option<Arc<lanlink_gateway::GatewayManager>>,
     metrics: Arc<Metrics>,
     mtu: usize,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    let mut set = JoinSet::new();
+
     // TAP -> network
     let nic_tx = nic.clone();
     let switch_tx = switch.clone();
     let socket_tx = socket.clone();
     let tcp_tx = tcp_transport.clone();
     let metrics_tx = metrics.clone();
-    let mut tx_task = tokio::spawn(async move {
+    set.spawn(async move {
         let mut buf = vec![0u8; mtu + 128];
         loop {
             let n = match nic_tx.lock().await.read_frame(&mut buf).await {
@@ -1175,7 +1477,7 @@ async fn start_coordinated_pump(
     let puncher_rx = puncher.clone();
     let gateway_rx = gateway_manager.clone();
     let metrics_rx = metrics.clone();
-    let mut rx_task = tokio::spawn(async move {
+    set.spawn(async move {
         let mut buf = vec![0u8; mtu + 256];
         loop {
             let (n, from) = match socket_rx.recv_from(&mut buf).await {
@@ -1265,7 +1567,7 @@ async fn start_coordinated_pump(
     let tcp_reply = tcp_transport.clone();
     let nic_tcp = nic.clone();
     let gateway_tcp = gateway_manager.clone();
-    let mut tcp_task = tokio::spawn(async move {
+    set.spawn(async move {
         while let Some((from, packet)) = tcp_rx.recv().await {
             match switch_tcp.lock().await.on_packet(from, &packet) {
                 Ok(lanlink_switch::UdpOutcome::Frame(frame)) => {
@@ -1301,7 +1603,7 @@ async fn start_coordinated_pump(
     let switch_kp = switch.clone();
     let socket_kp = socket.clone();
     let tcp_kp = tcp_transport.clone();
-    let mut kp_task = tokio::spawn(async move {
+    set.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(20));
         loop {
             interval.tick().await;
@@ -1336,7 +1638,7 @@ async fn start_coordinated_pump(
     let switch_ping = switch.clone();
     let socket_ping = socket.clone();
     let tcp_ping = tcp_transport.clone();
-    let mut ping_task = tokio::spawn(async move {
+    set.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             interval.tick().await;
@@ -1366,21 +1668,38 @@ async fn start_coordinated_pump(
         }
     });
 
-    tokio::select! {
-        _ = shutdown().wait() => {
-            tracing::info!("shutting down");
-            tx_task.abort();
-            rx_task.abort();
-            tcp_task.abort();
-            kp_task.abort();
-            ping_task.abort();
+    loop {
+        tokio::select! {
+            _ = shutdown().wait() => {
+                tracing::info!("shutting down");
+                set.abort_all();
+                break;
+            }
+            _ = cancel.cancelled() => {
+                tracing::info!("session cancelled; leaving network");
+                set.abort_all();
+                break;
+            }
+            res = set.join_next() => {
+                match res {
+                    Some(Ok(())) => {
+                        tracing::debug!("pump subtask exited");
+                    }
+                    Some(Err(e)) if e.is_cancelled() => {}
+                    Some(Err(e)) => {
+                        if let Ok(payload) = e.try_into_panic() {
+                            std::panic::resume_unwind(payload);
+                        }
+                    }
+                    None => break,
+                }
+            }
         }
-        _ = &mut tx_task => {}
-        _ = &mut rx_task => {}
-        _ = &mut tcp_task => {}
-        _ = &mut kp_task => {}
-        _ = &mut ping_task => {}
     }
+
+    // Wait for every spawned pump task to actually stop so its sockets are
+    // released before the caller re-binds the same ports.
+    while set.join_next().await.is_some() {}
 
     Ok(())
 }

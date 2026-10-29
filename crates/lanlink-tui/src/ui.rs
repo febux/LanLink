@@ -94,7 +94,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             };
             Span::styled(toast.message.clone(), style)
         }
-        (None, false) => Span::styled("? help  q quit", Style::new().dim()),
+        (None, false) => Span::styled("? help  d disconnect  x stop  q quit", Style::new().dim()),
     };
 
     let right = Span::styled(
@@ -462,6 +462,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
         "  1 / 2 / 3, arrows  switch tab",
         "  q, Ctrl-C          quit",
         "  ?                  toggle this help",
+        "  d                  disconnect from the current network",
+        "  x                  stop the daemon",
         "",
         "  Dashboard          live daemon overview",
         "  Peers       s      cycle sort (latency / ip / traffic)",

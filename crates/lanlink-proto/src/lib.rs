@@ -3,6 +3,7 @@
 //! This crate is meant to be language-agnostic: the data-plane frame layout,
 //! control-plane API messages, and versioning constants live here.
 
+pub mod control;
 pub mod status;
 pub mod telemetry;
 pub mod update;
@@ -214,3 +215,10 @@ pub struct RelayBind {
 pub const RELAY_MAGIC: &[u8] = b"LLR\x01";
 pub const RELAY_BIND_PACKET_TYPE: u8 = 1;
 pub const RELAY_KEEPALIVE_PACKET_TYPE: u8 = 2;
+
+/// Daemon-to-coordinator notification that this node is leaving the network.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LeaveNetworkRequest {
+    pub password: String,
+    pub node_id: NodeId,
+}

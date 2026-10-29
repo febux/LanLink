@@ -149,7 +149,7 @@ dist: ## Build all distribution packages available on this host
 # Group: E2E scenario runners
 # ---------------------------------------------------------------------------
 
-.PHONY: e2e-build e2e e2e-join e2e-direct e2e-relay e2e-status e2e-mac-switch e2e-pmtu e2e-gateway e2e-firewall
+.PHONY: e2e-build e2e e2e-join e2e-direct e2e-relay e2e-status e2e-mac-switch e2e-pmtu e2e-gateway e2e-firewall e2e-disconnect
 
 E2E_BINS := target/release/lanlinkd target/release/lanlinkctl target/release/lanlink-coordinator target/release/lanlink-relayd
 
@@ -164,11 +164,11 @@ e2e-$1: $(E2E_BINS) ## Run e2e/$1.sh (requires root)
 	./e2e/$1.sh
 endef
 
-$(foreach script,join direct relay status mac-switch pmtu gateway firewall,$(eval $(call E2E_RULE,$(script))))
+$(foreach script,join direct relay status mac-switch pmtu gateway firewall disconnect,$(eval $(call E2E_RULE,$(script))))
 
 e2e: ## Run all e2e scenarios (requires root; build first)
 	$(MAKE) e2e-build
-	for s in join direct relay status mac-switch pmtu gateway firewall; do \
+	for s in join direct relay status mac-switch pmtu gateway firewall disconnect; do \
 		./e2e/$$s.sh || exit $$?; \
 	done
 

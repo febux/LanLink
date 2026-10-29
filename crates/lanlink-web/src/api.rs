@@ -314,6 +314,7 @@ mod tests {
         StatusSnapshot {
             status: DaemonStatus {
                 version: "0.1.0-test".into(),
+                pid: 1234,
                 network_id: NetworkId(42),
                 assigned_ip: VirtualIp("26.0.0.9".parse().unwrap()),
                 tap_name: "lanlink0".into(),
@@ -324,6 +325,7 @@ mod tests {
                 uptime_seconds: 99,
                 tx_bytes: 111,
                 rx_bytes: 222,
+                connected: true,
             },
             peers: vec![PeerStatus {
                 node_id: NodeId([7; 8]),

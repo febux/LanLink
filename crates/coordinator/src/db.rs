@@ -585,3 +585,19 @@ pub async fn aggregate_metrics(
             .collect(),
     })
 }
+
+pub async fn delete_member(
+    pool: &SqlitePool,
+    network_id: i64,
+    node_id: &[u8; 8],
+) -> anyhow::Result<bool> {
+    let rows = sqlx::query(
+        "DELETE FROM members WHERE network_id = ? AND node_id = ?",
+    )
+    .bind(network_id)
+    .bind(node_id.as_slice())
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(rows > 0)
+}

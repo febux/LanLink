@@ -1,68 +1,20 @@
-//! Local read-only status API for `lanlinkd`.
+//! Status data model shared by the persistent control/status socket.
 //!
-//! - On Unix: served over a Unix domain socket at
-//!   `/run/lanlink/lanlinkd-<network_id>.sock` (with a `/tmp` fallback).
-//! - On Windows: served over a TCP loopback socket at `127.0.0.1:<port>`,
-//!   where the default port is `9000 + network_id`. Override with the
-//!   `status.socket` config value, e.g. `"127.0.0.1:19501"`.
-//!
-//! The socket speaks newline-delimited JSON: one [`StatusRequest`] per line
-//! in, one [`lanlink_proto::status::StatusResponse`] per line out. Multiple
-//! requests per connection are allowed; a half-close ends the session. The
-//! protocol is read-only and exposes no secrets.
-//!
-//! Failure to create the socket never aborts the daemon: the data plane is
-//! the critical path, the status API is a convenience for frontends.
+//! The actual socket server lives in [`crate::control`]; this module only
+//! maintains the in-memory registry, live session state, and the snapshot
+//! that is served to frontends.
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-#[cfg(unix)]
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use lanlink_proto::status::{DaemonStatus, PathKind, PeerStatus, StatusResponse, StatusSnapshot};
+use lanlink_proto::status::{DaemonStatus, PathKind, PeerStatus, StatusSnapshot};
 use lanlink_proto::{NodeId, VirtualIp};
 use lanlink_switch::Transport;
 use tokio::sync::Mutex;
 
 use crate::Metrics;
-
-/// Default Unix socket path for a joined network (root-created, mode 0660).
-#[cfg(unix)]
-fn default_socket_path(network_id: u64) -> PathBuf {
-    PathBuf::from(format!("/run/lanlink/lanlinkd-{network_id}.sock"))
-}
-
-/// Unprivileged fallback used when `/run/lanlink` cannot be created (dev).
-#[cfg(unix)]
-fn fallback_socket_path(network_id: u64) -> PathBuf {
-    PathBuf::from(format!("/tmp/lanlinkd-{network_id}.sock"))
-}
-
-/// Default Windows TCP loopback address for a joined network.
-#[cfg(windows)]
-fn default_tcp_addr(network_id: u64) -> SocketAddr {
-    // Port 9000 collides with the default data-plane UDP bind, so offset by
-    // the network id to give each network a distinct status port.
-    SocketAddr::from(([127, 0, 0, 1], (9000u16 + network_id as u16)))
-}
-
-/// Parse a user-supplied `status.socket` value. On Unix it is a filesystem path.
-/// On Windows it may be a `host:port` string; if it parses as a path without
-/// a port, treat it as a TCP address by deriving the port from `network_id`.
-#[cfg(windows)]
-fn parse_status_addr(configured: Option<String>, network_id: u64) -> Vec<SocketAddr> {
-    if let Some(value) = configured {
-        if let Ok(addr) = value.parse::<SocketAddr>() {
-            return vec![addr];
-        }
-        if let Ok(port) = value.parse::<u16>() {
-            return vec![SocketAddr::from(([127, 0, 0, 1], port))];
-        }
-    }
-    vec![default_tcp_addr(network_id)]
-}
 
 /// Static info about this daemon run, set once after a successful join.
 #[derive(Debug, Clone)]
@@ -167,6 +119,7 @@ impl StatusState {
 
         let status = DaemonStatus {
             version: env!("CARGO_PKG_VERSION").to_string(),
+            pid: std::process::id(),
             network_id: lanlink_proto::NetworkId(info.as_ref().map(|i| i.network_id).unwrap_or(0)),
             assigned_ip: info
                 .as_ref()
@@ -186,6 +139,7 @@ impl StatusState {
             uptime_seconds: self.start.elapsed().as_secs(),
             tx_bytes: self.metrics.tx_bytes(),
             rx_bytes: self.metrics.rx_bytes(),
+            connected: info.is_some(),
         };
 
         StatusSnapshot { status, peers }
@@ -232,198 +186,10 @@ fn classify_path(
     }
 }
 
-/// Bind the status listener and spawn the accept loop. Failure is logged and
-/// the daemon continues without a status API.
-pub async fn spawn_server(configured: Option<String>, network_id: u64, state: StatusState) {
-    #[cfg(unix)]
-    {
-        let candidates: Vec<PathBuf> = match configured {
-            Some(p) => vec![PathBuf::from(p)],
-            None => vec![
-                default_socket_path(network_id),
-                fallback_socket_path(network_id),
-            ],
-        };
-
-        tokio::spawn(async move {
-            for path in candidates {
-                match bind_listener(&path) {
-                    Ok(listener) => {
-                        tracing::info!(path = %path.display(), "status socket listening");
-                        run_server(listener, &path, state).await;
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "status socket bind failed"
-                        );
-                    }
-                }
-            }
-            tracing::warn!("status server disabled: no usable socket path");
-        });
-    }
-
-    #[cfg(windows)]
-    {
-        let candidates = parse_status_addr(configured, network_id);
-        tokio::spawn(async move {
-            for addr in candidates {
-                match tokio::net::TcpListener::bind(addr).await {
-                    Ok(listener) => {
-                        tracing::info!(%addr, "status TCP listener bound");
-                        run_tcp_server(listener, addr, state).await;
-                        return;
-                    }
-                    Err(e) => {
-                        tracing::warn!(%addr, error = %e, "status TCP bind failed");
-                    }
-                }
-            }
-            tracing::warn!("status server disabled: no usable TCP address");
-        });
-    }
-}
-
-#[cfg(unix)]
-fn bind_listener(path: &PathBuf) -> std::io::Result<tokio::net::UnixListener> {
-    use std::os::unix::fs::PermissionsExt;
-
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    // Remove a stale socket left by a crashed previous run.
-    let _ = std::fs::remove_file(path);
-    let listener = tokio::net::UnixListener::bind(path)?;
-    // Make the socket world-connectable so desktop/TUI/Web frontends running as
-    // the normal interactive user can reach the daemon without requiring the
-    // user to be in the lanlink group. The data exposed is read-only
-    // operational status (peer list, virtual IPs, counters); it contains no
-    // secrets.
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666));
-    Ok(listener)
-}
-
-#[cfg(unix)]
-async fn run_server(listener: tokio::net::UnixListener, path: &PathBuf, state: StatusState) {
-    loop {
-        tokio::select! {
-            _ = crate::shutdown().wait() => {
-                tracing::debug!("status server stopping");
-                break;
-            }
-            accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, _)) => {
-                        let state = state.clone();
-                        tokio::spawn(handle_conn(stream, state));
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, "status accept failed");
-                    }
-                }
-            }
-        }
-    }
-    let _ = std::fs::remove_file(path);
-}
-
-#[cfg(unix)]
-async fn handle_conn(stream: tokio::net::UnixStream, state: StatusState) {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break, // client closed the connection
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
-        let response =
-            match serde_json::from_str::<lanlink_proto::status::StatusRequest>(line.trim_end()) {
-                Ok(lanlink_proto::status::StatusRequest::Snapshot) => {
-                    StatusResponse::Snapshot(state.snapshot().await)
-                }
-                Err(e) => StatusResponse::Error {
-                    error: format!("bad request: {e}"),
-                },
-            };
-
-        let mut out = serde_json::to_string(&response)
-            .unwrap_or_else(|_| "{\"error\":\"snapshot encode failed\"}".to_string());
-        out.push('\n');
-        if reader.get_mut().write_all(out.as_bytes()).await.is_err() {
-            break;
-        }
-    }
-}
-
-#[cfg(windows)]
-async fn run_tcp_server(listener: tokio::net::TcpListener, addr: SocketAddr, state: StatusState) {
-    loop {
-        tokio::select! {
-            _ = crate::shutdown().wait() => {
-                tracing::debug!("status TCP server stopping");
-                break;
-            }
-            accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, _)) => {
-                        let state = state.clone();
-                        tokio::spawn(handle_tcp_conn(stream, state));
-                    }
-                    Err(e) => {
-                        tracing::debug!(error = %e, "status TCP accept failed");
-                    }
-                }
-            }
-        }
-    }
-    let _ = addr;
-}
-
-#[cfg(windows)]
-async fn handle_tcp_conn(stream: tokio::net::TcpStream, state: StatusState) {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    let (reader_half, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader_half);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
-        let response =
-            match serde_json::from_str::<lanlink_proto::status::StatusRequest>(line.trim_end()) {
-                Ok(lanlink_proto::status::StatusRequest::Snapshot) => {
-                    StatusResponse::Snapshot(state.snapshot().await)
-                }
-                Err(e) => StatusResponse::Error {
-                    error: format!("bad request: {e}"),
-                },
-            };
-
-        let mut out = serde_json::to_string(&response)
-            .unwrap_or_else(|_| "{\"error\":\"snapshot encode failed\"}".to_string());
-        out.push('\n');
-        if writer.write_all(out.as_bytes()).await.is_err() {
-            break;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lanlink_proto::status::StatusResponse;
 
     fn peer(id: u64, ip: &str, relay: Option<SocketAddr>) -> lanlink_proto::PeerInfo {
         lanlink_proto::PeerInfo {
@@ -686,5 +452,104 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[cfg(all(unix, test))]
+    fn bind_listener(path: &std::path::PathBuf) -> std::io::Result<tokio::net::UnixListener> {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let _ = std::fs::remove_file(path);
+        let listener = tokio::net::UnixListener::bind(path)?;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666));
+        Ok(listener)
+    }
+
+    #[cfg(all(unix, test))]
+    async fn handle_conn(stream: tokio::net::UnixStream, state: StatusState) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+
+            let response = match serde_json::from_str::<lanlink_proto::status::StatusRequest>(
+                line.trim_end(),
+            ) {
+                Ok(lanlink_proto::status::StatusRequest::Snapshot) => {
+                    StatusResponse::Snapshot(state.snapshot().await)
+                }
+                Err(e) => StatusResponse::Error {
+                    error: format!("bad request: {e}"),
+                },
+            };
+
+            let mut out = serde_json::to_string(&response)
+                .unwrap_or_else(|_| "{\"error\":\"snapshot encode failed\"}".to_string());
+            out.push('\n');
+            if reader.get_mut().write_all(out.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    }
+
+    #[cfg(all(windows, test))]
+    async fn handle_tcp_conn(stream: tokio::net::TcpStream, state: StatusState) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (reader_half, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader_half);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+
+            let response = match serde_json::from_str::<lanlink_proto::status::StatusRequest>(
+                line.trim_end(),
+            ) {
+                Ok(lanlink_proto::status::StatusRequest::Snapshot) => {
+                    StatusResponse::Snapshot(state.snapshot().await)
+                }
+                Err(e) => StatusResponse::Error {
+                    error: format!("bad request: {e}"),
+                },
+            };
+
+            let mut out = serde_json::to_string(&response)
+                .unwrap_or_else(|_| "{\"error\":\"snapshot encode failed\"}".to_string());
+            out.push('\n');
+            if writer.write_all(out.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    }
+
+    #[cfg(all(windows, test))]
+    fn parse_status_addr(configured: Option<String>, network_id: u64) -> Vec<SocketAddr> {
+        let default = SocketAddr::from(([127, 0, 0, 1], (9000u16 + network_id as u16)));
+        match configured {
+            Some(value) => {
+                if let Ok(addr) = value.parse::<SocketAddr>() {
+                    return vec![addr];
+                }
+                if let Ok(port) = value.parse::<u16>() {
+                    return vec![SocketAddr::from(([127, 0, 0, 1], port))];
+                }
+                vec![default]
+            }
+            None => vec![default],
+        }
     }
 }
