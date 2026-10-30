@@ -50,12 +50,15 @@ async fn connect_unix(candidates: &[String]) -> anyhow::Result<tokio::net::UnixS
 
 #[cfg(not(unix))]
 async fn connect_tcp(candidates: &[String]) -> anyhow::Result<tokio::net::TcpStream> {
-    let mut last_err = None;
+    let mut last_err: Option<(String, std::io::Error)> = None;
     for spec in candidates {
         let addr: std::net::SocketAddr = match spec.parse() {
             Ok(a) => a,
             Err(e) => {
-                last_err = Some((spec.clone(), e));
+                last_err = Some((
+                    spec.clone(),
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, e),
+                ));
                 continue;
             }
         };

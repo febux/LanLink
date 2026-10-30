@@ -29,3 +29,6 @@ Ticket: t_286530a5
 - [x] 3.1 Spec scenarios covered by unit tests in the project's accepted style (cross-platform script-builder tests under `cfg(windows)` module): 13 tests in `lanlink-gateway`, all scenario-relevant script builders asserted
 - [x] 3.2 `cargo check --workspace` green (exit 0)
 - [x] 3.3 `cargo test --workspace` green — all packages pass, incl. `lanlink-gateway` 13/13, `lanlinkd` 19/19, `lanlink-firewall` 7/7
+- [x] 3.4 Fix Windows-only type inference in `lanlinkctl/src/control.rs` (`connect_tcp` `last_err` mismatched `AddrParseError` vs `io::Error`) so MSI build compiles
+  - `crates/lanlinkctl/src/control.rs:53` typed `last_err` as `Option<(String, std::io::Error)>` and wrapped `AddrParseError` into `io::Error::new(InvalidInput, e)`.
+  - Verified `cargo check --all-targets -p lanlinkctl` green on Linux; Windows path can only be fully validated by the MSI CI job.
