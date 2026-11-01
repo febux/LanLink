@@ -8,6 +8,7 @@ mod tasks;
 mod tcp;
 mod up;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use lanlink_types::RECOMMENDED_MTU;
 use std::collections::HashSet;
@@ -77,15 +78,15 @@ impl Metrics {
 
 /// Spawn a task that triggers the global shutdown signal on Ctrl-C and, on
 /// unix, SIGTERM/SIGHUP.
-fn spawn_os_signal_handlers() {
+fn spawn_os_signal_handlers() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         tokio::spawn(async move {
             use tokio::signal::unix::{signal, SignalKind};
             let mut sigterm =
-                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+                signal(SignalKind::terminate()).context("failed to install SIGTERM handler")?;
             let mut sighup =
-                signal(SignalKind::hangup()).expect("failed to install SIGHUP handler");
+                signal(SignalKind::hangup()).context("failed to install SIGHUP handler")?;
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = sigterm.recv() => {}
@@ -93,6 +94,7 @@ fn spawn_os_signal_handlers() {
             }
             tracing::info!("shutdown signal received");
             shutdown().trigger();
+            Ok::<(), anyhow::Error>(())
         });
     }
     #[cfg(not(unix))]
@@ -104,6 +106,7 @@ fn spawn_os_signal_handlers() {
             }
         });
     }
+    Ok(())
 }
 
 #[derive(Parser, Debug)]
@@ -287,27 +290,30 @@ async fn main() {
             network_id,
             mtu,
         } => {
-            spawn_os_signal_handlers();
-            let cancel = CancellationToken::new();
-            let shutdown_cancel = cancel.clone();
-            tokio::spawn(async move {
-                shutdown().wait().await;
-                shutdown_cancel.cancel();
-            });
-            run_static_peer(
-                tap,
-                local_ip,
-                prefix,
-                bind,
-                peer_addr,
-                node_id,
-                peer_node_id,
-                password,
-                network_id,
-                mtu,
-                cancel,
-            )
-            .await
+            if let Err(e) = spawn_os_signal_handlers() {
+                Err(anyhow::anyhow!("failed to install OS signal handler: {e}"))
+            } else {
+                let cancel = CancellationToken::new();
+                let shutdown_cancel = cancel.clone();
+                tokio::spawn(async move {
+                    shutdown().wait().await;
+                    shutdown_cancel.cancel();
+                });
+                run_static_peer(
+                    tap,
+                    local_ip,
+                    prefix,
+                    bind,
+                    peer_addr,
+                    node_id,
+                    peer_node_id,
+                    password,
+                    network_id,
+                    mtu,
+                    cancel,
+                )
+                .await
+            }
         }
         Cmd::Run {
             config,
@@ -323,30 +329,33 @@ async fn main() {
             phys_interface,
             status_socket,
         } => {
-            spawn_os_signal_handlers();
-            let cli = config::CliOverrides {
-                coordinator,
-                network_id,
-                password,
-                bind,
-                tap,
-                mtu,
-                stun_servers,
-                gateway: gateway.then_some(true),
-                shared_subnet,
-                phys_interface,
-                status_socket,
-            };
-            let cfg = match config {
-                Some(path) => config::load(&path, &cli),
-                None => config::resolve(&config::FileConfig::default(), &cli),
-            };
-            match cfg {
-                Ok(cfg) => {
-                    let control_socket = cfg.status_socket.clone();
-                    run_daemon_runtime(cfg, control_socket).await
+            if let Err(e) = spawn_os_signal_handlers() {
+                Err(anyhow::anyhow!("failed to install OS signal handler: {e}"))
+            } else {
+                let cli = config::CliOverrides {
+                    coordinator,
+                    network_id,
+                    password,
+                    bind,
+                    tap,
+                    mtu,
+                    stun_servers,
+                    gateway: gateway.then_some(true),
+                    shared_subnet,
+                    phys_interface,
+                    status_socket,
+                };
+                let cfg = match config {
+                    Some(path) => config::load(&path, &cli),
+                    None => config::resolve(&config::FileConfig::default(), &cli),
+                };
+                match cfg {
+                    Ok(cfg) => {
+                        let control_socket = cfg.status_socket.clone();
+                        run_daemon_runtime(cfg, control_socket).await
+                    }
+                    Err(e) => Err(anyhow::anyhow!("configuration error: {e}")),
                 }
-                Err(e) => Err(anyhow::anyhow!("configuration error: {e}")),
             }
         }
         Cmd::Up {
@@ -359,28 +368,31 @@ async fn main() {
             mtu,
             status_socket,
         } => {
-            spawn_os_signal_handlers();
-            match password.or_else(|| std::env::var("LANLINK_PASSWORD").ok()) {
-                Some(password) => {
-                    match up::resolve_config(
-                        coordinator,
-                        name,
-                        password,
-                        public,
-                        bind,
-                        tap,
-                        mtu,
-                        status_socket.clone(),
-                    )
-                    .await
-                    {
-                        Ok(cfg) => run_daemon_runtime(cfg, status_socket).await,
-                        Err(e) => Err(e),
+            if let Err(e) = spawn_os_signal_handlers() {
+                Err(anyhow::anyhow!("failed to install OS signal handler: {e}"))
+            } else {
+                match password.or_else(|| std::env::var("LANLINK_PASSWORD").ok()) {
+                    Some(password) => {
+                        match up::resolve_config(
+                            coordinator,
+                            name,
+                            password,
+                            public,
+                            bind,
+                            tap,
+                            mtu,
+                            status_socket.clone(),
+                        )
+                        .await
+                        {
+                            Ok(cfg) => run_daemon_runtime(cfg, status_socket).await,
+                            Err(e) => Err(e),
+                        }
                     }
+                    None => Err(anyhow::anyhow!(
+                        "--password or LANLINK_PASSWORD env var is required"
+                    )),
                 }
-                None => Err(anyhow::anyhow!(
-                    "--password or LANLINK_PASSWORD env var is required"
-                )),
             }
         }
         Cmd::Service(sub) => service::dispatch(sub).await,
@@ -394,7 +406,7 @@ async fn main() {
 
 /// Load a config file and run the persistent daemon runtime (used by `service run`).
 pub async fn run_from_config_path(path: &str) -> anyhow::Result<()> {
-    spawn_os_signal_handlers();
+    spawn_os_signal_handlers()?;
     let cfg = config::load(path, &config::CliOverrides::default())
         .map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
     let control_socket = cfg.status_socket.clone();
