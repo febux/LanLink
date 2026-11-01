@@ -181,13 +181,17 @@ async function api(path, opts = {}) {
 
 async function refreshSnapshot() {
   try {
-    const data = await api('/api/snapshot');
-    if (data.snapshot) {
+    const res = await fetch('/api/snapshot', {
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.snapshot) {
       state.snapshot = data.snapshot;
       renderStatus(true, 'daemon online');
     } else {
       state.snapshot = null;
-      renderStatus(false, data.error || 'daemon offline');
+      const msg = data.error || (res.status === 503 ? 'daemon unavailable' : `HTTP ${res.status}`);
+      renderStatus(false, msg);
     }
   } catch (e) {
     state.snapshot = null;

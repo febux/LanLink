@@ -1,13 +1,12 @@
 //! HTTP API handlers and daemon status-socket client for `lanlink-web`.
 
-#[cfg(windows)]
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
+use lanlink_client::discover_socket;
 use lanlink_proto::status::{StatusRequest, StatusResponse, StatusSnapshot};
 use lanlink_proto::{
     CreateNetworkRequest, CreateNetworkResponse, JoinNetworkRequest, JoinNetworkResponse, NodeId,
@@ -28,8 +27,8 @@ pub struct AppState {
 
 impl AppState {
     /// Resolve the daemon status socket: use the override if set, otherwise
-    /// auto-discover a listening `/run/lanlink/lanlinkd-*.sock` or
-    /// `/tmp/lanlinkd-*.sock`.
+    /// auto-discover a listening `/run/lanlink/lanlinkd-control.sock` or
+    /// `/tmp/lanlinkd-control.sock`.
     pub async fn resolve_socket(&self) -> Result<Option<PathBuf>, String> {
         let guard = self.status_socket.lock().await;
         if let Some(path) = guard.as_ref() {
@@ -62,7 +61,11 @@ pub async fn snapshot(State(state): State<AppState>) -> impl IntoResponse {
             Json(json!({"error": "no daemon status socket found"})),
         )
             .into_response(),
-        Err(e) => (StatusCode::FORBIDDEN, Json(json!({"error": e}))).into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": e})),
+        )
+            .into_response(),
     }
 }
 
@@ -132,7 +135,10 @@ pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
     let text = std::str::from_utf8(&buf)?;
-    let line = text.lines().next().unwrap_or("");
+    let line = text
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty response from daemon control socket"))?;
     match serde_json::from_str::<StatusResponse>(line)? {
         StatusResponse::Snapshot(snapshot) => Ok(snapshot),
         StatusResponse::Error { error } => anyhow::bail!("daemon: {error}"),
@@ -160,99 +166,17 @@ pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
     let text = std::str::from_utf8(&buf)?;
-    let line = text.lines().next().unwrap_or("");
+    let line = text
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty response from daemon control socket"))?;
     match serde_json::from_str::<StatusResponse>(line)? {
         StatusResponse::Snapshot(snapshot) => Ok(snapshot),
         StatusResponse::Error { error } => anyhow::bail!("daemon: {error}"),
     }
 }
 
-/// Find a listening daemon socket when `--status-socket` was not given.
-#[cfg(unix)]
-pub async fn discover_socket() -> Result<Option<PathBuf>, String> {
-    const DIRS: &[&str] = &["/run/lanlink", "/tmp"];
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for dir in DIRS {
-        match std::fs::read_dir(dir) {
-            Ok(entries) => {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let name = name.to_string_lossy();
-                    if name.starts_with("lanlinkd-") && name.ends_with(".sock") {
-                        candidates.push(entry.path());
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                return Err(format!(
-                    "permission denied reading {dir}: add your user to the 'lanlink' group with \"sudo usermod -aG lanlink $USER\", then log out and back in (or run \"newgrp lanlink\" in this shell)"
-                ));
-            }
-            Err(_) => {}
-        }
-    }
-    candidates.sort();
-    for path in candidates {
-        if probe(&path).await {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
-}
-
-/// Path of the live daemon config written by the MSI / `service up`
-/// (matches `CONFIG_PATH` in `crates/lanlinkd/src/service.rs`).
-#[cfg(windows)]
-const DAEMON_CONFIG: &str = "C:\\Program Files\\LanLink\\lanlinkd.toml";
-
-/// Read the configured `[status] socket` from the daemon config, if the
-/// config exists and parses.
-#[cfg(windows)]
-fn configured_status_socket() -> Option<String> {
-    #[derive(serde::Deserialize, Default)]
-    struct Probe {
-        #[serde(default)]
-        status: StatusSection,
-    }
-    #[derive(serde::Deserialize, Default)]
-    struct StatusSection {
-        socket: Option<String>,
-    }
-    let text = std::fs::read_to_string(DAEMON_CONFIG).ok()?;
-    let probe: Probe = toml::from_str(&text).ok()?;
-    probe.status.socket
-}
-
-#[cfg(windows)]
-pub async fn discover_socket() -> Result<Option<PathBuf>, String> {
-    // The daemon config is authoritative when it names a status socket.
-    if let Some(configured) = configured_status_socket() {
-        if let Ok(addr) = configured.parse::<SocketAddr>() {
-            if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                return Ok(Some(PathBuf::from(addr.to_string())));
-            }
-        }
-    }
-    // Default layout: port = 9000 + network_id, ids 1..=32.
-    for network_id in 1u64..=32 {
-        let addr = SocketAddr::from(([127, 0, 0, 1], (9000u16 + network_id as u16)));
-        if tokio::net::TcpStream::connect(addr).await.is_ok() {
-            return Ok(Some(PathBuf::from(addr.to_string())));
-        }
-    }
-    Ok(None)
-}
-
-#[cfg(unix)]
-async fn probe(path: &Path) -> bool {
-    tokio::net::UnixStream::connect(path).await.is_ok()
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-async fn probe(_path: &Path) -> bool {
-    false
-}
+// Socket discovery is provided by the shared `lanlink-client` crate.
 
 /// List public networks from the coordinator directory.
 pub async fn list_directory(
@@ -383,10 +307,58 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn empty_response_fails_cleanly() {
+        use tokio::io::AsyncReadExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "lanlink-web-empty-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("status.sock");
+        let _ = std::fs::remove_file(&path);
+
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            // Read the request to avoid RST, then close without replying.
+            let mut buf = [0u8; 256];
+            let _ = stream.read(&mut buf).await;
+        });
+
+        let err = fetch_snapshot(&path)
+            .await
+            .expect_err("must fail for empty response");
+        assert!(
+            err.to_string().contains("empty response from daemon control socket"),
+            "unexpected error: {err}"
+        );
+
+        server.await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[tokio::test]
     async fn missing_socket_fails_cleanly() {
-        let err = fetch_snapshot(Path::new("/nonexistent/lanlinkd-0.sock"))
+        let err = fetch_snapshot(Path::new("/nonexistent/lanlinkd-control.sock"))
             .await
             .expect_err("must fail");
         assert!(!err.to_string().is_empty());
+    }
+
+    #[tokio::test]
+    async fn snapshot_endpoint_returns_503_when_daemon_unreachable() {
+        let state = AppState {
+            coordinator: "http://localhost:8080".into(),
+            status_socket: Arc::new(Mutex::new(Some(PathBuf::from(
+                "/nonexistent/lanlinkd-control.sock",
+            )))),
+            http: reqwest::Client::new(),
+        };
+        let resp = snapshot(State(state)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

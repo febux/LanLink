@@ -14,13 +14,12 @@ path = "src/main.rs"
 anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
+lanlink-client = { path = "../lanlink-client" }
 lanlink-proto = { path = "../lanlink-proto" }
 rand = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# Windows status-socket discovery reads the daemon config's [status] table.
-toml.workspace = true
 tokio = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
