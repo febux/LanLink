@@ -513,3 +513,23 @@ async fn resolve_network_db_error_returns_internal_server_error() {
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     );
 }
+
+#[tokio::test]
+async fn aggregate_metrics_returns_defaults_on_empty_table() {
+    let pool = coordinator::db::connect_test().await.expect("db");
+
+    let metrics = coordinator::db::aggregate_metrics(&pool, 3600)
+        .await
+        .expect("aggregate on empty table");
+
+    assert_eq!(metrics.report_count, 0);
+    assert_eq!(metrics.avg_peer_count, 0.0);
+    assert_eq!(metrics.avg_direct_peers, 0.0);
+    assert_eq!(metrics.avg_relay_peers, 0.0);
+    assert_eq!(metrics.gateway_fraction, 0.0);
+    assert_eq!(metrics.firewall_fraction, 0.0);
+    assert_eq!(metrics.total_tx_bytes, 0);
+    assert_eq!(metrics.total_rx_bytes, 0);
+    assert!(metrics.versions.is_empty());
+    assert!(metrics.platforms.is_empty());
+}

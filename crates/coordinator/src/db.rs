@@ -640,14 +640,14 @@ pub async fn aggregate_metrics(
     let row: (i64, f64, f64, f64, f64, f64, i64, i64) = sqlx::query_as(
         r#"
         SELECT
-            COUNT(*),
-            AVG(peer_count),
-            AVG(direct_peer_count),
-            AVG(relay_peer_count),
-            AVG(gateway_enabled),
-            AVG(firewall_enabled),
-            SUM(tx_bytes),
-            SUM(rx_bytes)
+            COALESCE(COUNT(*), 0),
+            COALESCE(AVG(peer_count), 0.0),
+            COALESCE(AVG(direct_peer_count), 0.0),
+            COALESCE(AVG(relay_peer_count), 0.0),
+            COALESCE(AVG(gateway_enabled), 0.0),
+            COALESCE(AVG(firewall_enabled), 0.0),
+            COALESCE(SUM(tx_bytes), 0),
+            COALESCE(SUM(rx_bytes), 0)
         FROM telemetry
         WHERE received_at >= ?
         "#,
