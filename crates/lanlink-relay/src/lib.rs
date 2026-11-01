@@ -42,7 +42,7 @@ const BINDING_LIFETIME: Duration = Duration::from_secs(90);
 /// How often to purge stale bindings.
 const PRUNE_INTERVAL: Duration = Duration::from_secs(30);
 /// Minimum length of a LanLink outer packet so the relay can read the receiver id.
-const MIN_LANLINK_LEN: usize = 4 + lanlink_proto::NODE_ID_LEN;
+const MIN_LANLINK_LEN: usize = 4 + lanlink_types::NODE_ID_LEN;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RelayError {
@@ -55,13 +55,13 @@ pub enum RelayError {
 /// A content-blind UDP relay server entry.
 #[derive(Debug, Clone)]
 pub struct Binding {
-    pub node_id: lanlink_proto::NodeId,
+    pub node_id: lanlink_types::NodeId,
     pub addr: SocketAddr,
     pub last_seen: Instant,
 }
 
 struct RelayState {
-    bindings: HashMap<lanlink_proto::NodeId, Binding>,
+    bindings: HashMap<lanlink_types::NodeId, Binding>,
     last_prune: Instant,
 }
 
@@ -131,9 +131,9 @@ impl RelayServer {
             return Err(RelayError::MalformedControl);
         }
 
-        let mut receiver = [0u8; lanlink_proto::NODE_ID_LEN];
-        receiver.copy_from_slice(&packet[4..4 + lanlink_proto::NODE_ID_LEN]);
-        let receiver = lanlink_proto::NodeId(receiver);
+        let mut receiver = [0u8; lanlink_types::NODE_ID_LEN];
+        receiver.copy_from_slice(&packet[4..4 + lanlink_types::NODE_ID_LEN]);
+        let receiver = lanlink_types::NodeId(receiver);
 
         let state = self.state.lock().await;
         let Some(binding) = state.bindings.get(&receiver) else {
@@ -175,7 +175,7 @@ impl RelayServer {
 
 /// Client-side helpers for interacting with a LanLink relay server.
 pub mod codec {
-    use lanlink_proto::{NodeId, RELAY_BIND_PACKET_TYPE, RELAY_KEEPALIVE_PACKET_TYPE, RELAY_MAGIC};
+    use lanlink_types::{NodeId, RELAY_BIND_PACKET_TYPE, RELAY_KEEPALIVE_PACKET_TYPE, RELAY_MAGIC};
 
     /// Decoded relay control message.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,7 +190,7 @@ pub mod codec {
         pub node_id: NodeId,
     }
 
-    const CONTROL_LEN: usize = RELAY_MAGIC.len() + 1 + lanlink_proto::NODE_ID_LEN;
+    const CONTROL_LEN: usize = RELAY_MAGIC.len() + 1 + lanlink_types::NODE_ID_LEN;
 
     /// Encode a relay bind packet for `node_id`.
     pub fn encode_bind(node_id: NodeId) -> Vec<u8> {
@@ -225,7 +225,7 @@ pub mod codec {
             RELAY_KEEPALIVE_PACKET_TYPE => ControlKind::Keepalive,
             _ => return None,
         };
-        let mut node_id = [0u8; lanlink_proto::NODE_ID_LEN];
+        let mut node_id = [0u8; lanlink_types::NODE_ID_LEN];
         node_id.copy_from_slice(&packet[RELAY_MAGIC.len() + 1..CONTROL_LEN]);
         Some(ControlMsg {
             kind,
@@ -240,10 +240,10 @@ mod tests {
     use std::time::Duration;
     use tokio::net::UdpSocket;
 
-    fn node(id: u8) -> lanlink_proto::NodeId {
+    fn node(id: u8) -> lanlink_types::NodeId {
         let mut b = [0u8; 8];
         b[7] = id;
-        lanlink_proto::NodeId(b)
+        lanlink_types::NodeId(b)
     }
 
     #[test]
@@ -258,8 +258,8 @@ mod tests {
     #[test]
     fn normal_lanlink_packet_not_control() {
         let mut packet = vec![0u8; 20];
-        packet[0] = lanlink_proto::WIRE_PROTOCOL_VERSION;
-        packet[1] = lanlink_proto::DATA_PACKET_TYPE;
+        packet[0] = lanlink_types::WIRE_PROTOCOL_VERSION;
+        packet[1] = lanlink_types::DATA_PACKET_TYPE;
         assert!(decode_control(&packet).is_none());
     }
 
@@ -291,11 +291,11 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Client A sends a fake LanLink packet addressed to node B.
-        let mut data = vec![0u8; 4 + lanlink_proto::NODE_ID_LEN + 4];
-        data[0] = lanlink_proto::WIRE_PROTOCOL_VERSION;
-        data[1] = lanlink_proto::DATA_PACKET_TYPE;
-        data[4..4 + lanlink_proto::NODE_ID_LEN].copy_from_slice(&node_b.0);
-        data[4 + lanlink_proto::NODE_ID_LEN..].copy_from_slice(b"ping");
+        let mut data = vec![0u8; 4 + lanlink_types::NODE_ID_LEN + 4];
+        data[0] = lanlink_types::WIRE_PROTOCOL_VERSION;
+        data[1] = lanlink_types::DATA_PACKET_TYPE;
+        data[4..4 + lanlink_types::NODE_ID_LEN].copy_from_slice(&node_b.0);
+        data[4 + lanlink_types::NODE_ID_LEN..].copy_from_slice(b"ping");
 
         socket_a.send_to(&data, relay_addr).await.unwrap();
 

@@ -1,15 +1,16 @@
 #[cfg(windows)]
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use lanlink_proto::control::{ControlRequest, ControlResponse, ControlResult};
+#[cfg(windows)]
+use lanlink_client::{configured_status_socket, DAEMON_CONFIG};
+use lanlink_client::{discover_socket, fetch_snapshot, send_command};
+use lanlink_proto::control::{ControlRequest, ControlResponse};
 use lanlink_proto::status::StatusSnapshot;
-use lanlink_proto::{
-    CreateNetworkRequest, CreateNetworkResponse, JoinNetworkRequest, JoinNetworkResponse, NodeId,
-    PublicNetworkInfo,
-};
+use lanlink_types::{NodeId};
+use lanlink_proto::{CreateNetworkRequest, CreateNetworkResponse, JoinNetworkRequest, JoinNetworkResponse, PublicNetworkInfo};
 use rand::RngCore;
 use reqwest::Client;
 use tauri::{AppHandle, State};
@@ -215,7 +216,7 @@ async fn run_lanlinkd_service_elevated(args: &[&str]) -> Result<String, String> 
 pub struct DesktopState {
     pub coordinator: String,
     pub control_socket: Arc<Mutex<Option<PathBuf>>>,
-    pub http: Client,
+    pub http: Arc<Client>,
     /// The built-in coordinator process, if this app launched it.
     pub coordinator_child: Arc<Mutex<Option<tokio::process::Child>>>,
 }
@@ -226,6 +227,7 @@ impl DesktopState {
             .timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build HTTP client");
+        let http = Arc::new(http);
         Self {
             coordinator,
             control_socket: Arc::new(Mutex::new(control_socket)),
@@ -319,13 +321,13 @@ async fn coordinator_reachable(base: &str, http: &Client) -> bool {
 /// Report whether the built-in coordinator is reachable.
 #[tauri::command]
 pub async fn coordinator_status(state: State<'_, DesktopState>) -> Result<bool, String> {
-    Ok(coordinator_reachable(&state.coordinator, &state.http).await)
+    Ok(coordinator_reachable(&state.coordinator, state.http.as_ref()).await)
 }
 
 /// Start the bundled coordinator as a detached background process.
 #[tauri::command]
 pub async fn coordinator_start(state: State<'_, DesktopState>) -> Result<String, String> {
-    if coordinator_reachable(&state.coordinator, &state.http).await {
+    if coordinator_reachable(&state.coordinator, state.http.as_ref()).await {
         return Ok("coordinator is already running".to_string());
     }
     let exe = sibling_exe("lanlink-coordinator");
@@ -367,7 +369,7 @@ pub async fn coordinator_start(state: State<'_, DesktopState>) -> Result<String,
     // Wait briefly for the HTTP API to come up.
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(300)).await;
-        if coordinator_reachable(&state.coordinator, &state.http).await {
+        if coordinator_reachable(&state.coordinator, state.http.as_ref()).await {
             return Ok(format!(
                 "coordinator started on {listen} (db: {})",
                 db.display()
@@ -387,7 +389,7 @@ pub async fn coordinator_stop(state: State<'_, DesktopState>) -> Result<String, 
         let _ = child.kill().await;
         return Ok("coordinator stopped".to_string());
     }
-    if coordinator_reachable(&state.coordinator, &state.http).await {
+    if coordinator_reachable(&state.coordinator, state.http.as_ref()).await {
         return Err(
             "coordinator was not started by this app; stop it where it is running".to_string(),
         );
@@ -432,39 +434,15 @@ pub async fn daemon_log_tail() -> Result<Option<String>, String> {
     Ok(if tail.is_empty() { None } else { Some(tail) })
 }
 
-/// Path of the live daemon config written by the MSI / `service up`
-/// (matches `CONFIG_PATH` in `crates/lanlinkd/src/service.rs`).
-#[cfg(windows)]
-const DAEMON_CONFIG: &str = "C:\\Program Files\\LanLink\\lanlinkd.toml";
-
-/// Read the configured `[status] socket` from the daemon config, if the
-/// config exists and parses. Absent/invalid config = None (fall back to the
-/// default port scan).
-#[cfg(windows)]
-fn configured_status_socket() -> Option<String> {
-    #[derive(serde::Deserialize, Default)]
-    struct Probe {
-        #[serde(default)]
-        status: StatusSection,
-    }
-    #[derive(serde::Deserialize, Default)]
-    struct StatusSection {
-        socket: Option<String>,
-    }
-    let text = std::fs::read_to_string(DAEMON_CONFIG).ok()?;
-    let probe: Probe = toml::from_str(&text).ok()?;
-    probe.status.socket
-}
-
 /// Where the discovery below looked, for actionable error messages.
 #[cfg(windows)]
 fn status_probe_hint() -> String {
     match configured_status_socket() {
         Some(s) => format!(
-            "tried {s} (the [status] socket in {DAEMON_CONFIG}) and the default ports 127.0.0.1:9001-9032"
+            "tried {s} (the [status] socket in {DAEMON_CONFIG}) and the default 127.0.0.1:19000"
         ),
         None => format!(
-            "tried the default ports 127.0.0.1:9001-9032; to use another port set [status] socket in {DAEMON_CONFIG}"
+            "tried the default 127.0.0.1:19000; to use another port set [status] socket in {DAEMON_CONFIG}"
         ),
     }
 }
@@ -585,24 +563,17 @@ pub async fn list_directory(
 ) -> Result<Vec<PublicNetworkInfo>, String> {
     let url = state.coordinator.clone();
     let client = state.http.clone();
-    tokio::task::spawn_blocking(move || {
-        let runtime = tokio::runtime::Handle::current();
-        runtime.block_on(async move {
-            let networks: Vec<PublicNetworkInfo> = client
-                .get(format!("{url}/directory"))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?
-                .error_for_status()
-                .map_err(|e| e.to_string())?
-                .json()
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(networks)
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let networks: Vec<PublicNetworkInfo> = client
+        .get(format!("{url}/directory"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(networks)
 }
 
 /// Create a network through the coordinator.
@@ -616,10 +587,10 @@ pub async fn create_network(
     let is_public = isPublic;
     let req = CreateNetworkRequest {
         name,
-        password,
+        password: password.into(),
         is_public,
     };
-    do_create(&state.http, &state.coordinator, req)
+    do_create(state.http.as_ref(), &state.coordinator, req)
         .await
         .map_err(|e| e.to_string())
 }
@@ -639,7 +610,7 @@ pub async fn join_network(
     let mut node_id = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut node_id);
     let req = JoinNetworkRequest {
-        password,
+        password: password.into(),
         node_id: NodeId(node_id),
         public_key: vec![],
         direct_candidates: vec!["127.0.0.1:9000".parse().expect("static addr parses")],
@@ -648,7 +619,7 @@ pub async fn join_network(
         tcp_relay_candidates: vec![],
         shared_subnet: shared_subnet.unwrap_or_default(),
     };
-    do_join(&state.http, &state.coordinator, network_id, req)
+    do_join(state.http.as_ref(), &state.coordinator, network_id, req)
         .await
         .map_err(|e| e.to_string())
 }
@@ -659,55 +630,8 @@ pub async fn open_browser(_app: AppHandle, url: String) -> Result<(), String> {
     open::that(url).map_err(|e| e.to_string())
 }
 
-/// Send a control request and return the parsed response.
-async fn send_control_request(path: &Path, req: ControlRequest) -> anyhow::Result<ControlResponse> {
-    #[cfg(unix)]
-    {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut stream = tokio::net::UnixStream::connect(path).await?;
-        let body = serde_json::to_string(&req)?;
-        stream.write_all(body.as_bytes()).await?;
-        stream.write_all(b"\n").await?;
-        stream.shutdown().await?;
-
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await?;
-        let text = std::str::from_utf8(&buf)?;
-        let line = text.lines().next().unwrap_or("");
-        serde_json::from_str::<ControlResponse>(line)
-            .map_err(|e| anyhow::anyhow!("invalid control response: {e}"))
-    }
-    #[cfg(windows)]
-    {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let addr: SocketAddr = path
-            .to_str()
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| anyhow::anyhow!("invalid TCP control address: {}", path.display()))?;
-        let mut stream = tokio::net::TcpStream::connect(addr).await?;
-        let body = serde_json::to_string(&req)?;
-        stream.write_all(body.as_bytes()).await?;
-        stream.write_all(b"\n").await?;
-        stream.shutdown().await?;
-
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await?;
-        let text = std::str::from_utf8(&buf)?;
-        let line = text.lines().next().unwrap_or("");
-        serde_json::from_str::<ControlResponse>(line)
-            .map_err(|e| anyhow::anyhow!("invalid control response: {e}"))
-    }
-}
-
-async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
-    match send_control_request(path, ControlRequest::Status).await? {
-        ControlResponse::Ok {
-            result: ControlResult::Status(snapshot),
-        } => Ok(snapshot),
-        ControlResponse::Ok { .. } => anyhow::bail!("unexpected control response"),
-        ControlResponse::Error { error } => anyhow::bail!("daemon: {error}"),
-    }
-}
+// Daemon socket I/O is delegated to the shared `lanlink-client` crate
+// (`fetch_snapshot`, `send_command`, `discover_socket`).
 
 #[tauri::command]
 pub async fn disconnect_network(state: State<'_, DesktopState>) -> Result<String, String> {
@@ -716,7 +640,7 @@ pub async fn disconnect_network(state: State<'_, DesktopState>) -> Result<String
         Ok(None) => return Err(no_socket_message()),
         Err(e) => return Err(e),
     };
-    match send_control_request(&path, ControlRequest::Disconnect).await {
+    match send_command(&path, ControlRequest::Disconnect).await {
         Ok(ControlResponse::Ok { .. }) => Ok("disconnected".into()),
         Ok(ControlResponse::Error { error }) => Err(format!("daemon: {error}")),
         Err(e) => Err(format!("control error: {e}")),
@@ -730,53 +654,14 @@ pub async fn stop_daemon(state: State<'_, DesktopState>) -> Result<String, Strin
         Ok(None) => return Err(no_socket_message()),
         Err(e) => return Err(e),
     };
-    match send_control_request(&path, ControlRequest::Stop).await {
+    match send_command(&path, ControlRequest::Stop).await {
         Ok(ControlResponse::Ok { .. }) => Ok("daemon stopped".into()),
         Ok(ControlResponse::Error { error }) => Err(format!("daemon: {error}")),
         Err(e) => Err(format!("control error: {e}")),
     }
 }
 
-#[cfg(unix)]
-async fn discover_socket() -> Result<Option<PathBuf>, String> {
-    const DIRS: &[&str] = &["/run/lanlink", "/tmp"];
-    for dir in DIRS {
-        let path = PathBuf::from(dir).join("lanlinkd-control.sock");
-        if probe(&path).await {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
-}
-
-#[cfg(windows)]
-async fn discover_socket() -> Result<Option<PathBuf>, String> {
-    // The daemon config is authoritative when it names a status socket.
-    if let Some(configured) = configured_status_socket() {
-        if let Ok(addr) = configured.parse::<SocketAddr>() {
-            if tokio::net::TcpStream::connect(addr).await.is_ok() {
-                return Ok(Some(PathBuf::from(addr.to_string())));
-            }
-        }
-    }
-    // Default control socket port.
-    let addr = SocketAddr::from(([127, 0, 0, 1], 19000));
-    if tokio::net::TcpStream::connect(addr).await.is_ok() {
-        return Ok(Some(PathBuf::from(addr.to_string())));
-    }
-    Ok(None)
-}
-
-#[cfg(unix)]
-async fn probe(path: &Path) -> bool {
-    tokio::net::UnixStream::connect(path).await.is_ok()
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-async fn probe(_path: &Path) -> bool {
-    false
-}
+// Socket discovery is delegated to the shared `lanlink-client` crate.
 
 async fn do_create(
     client: &Client,

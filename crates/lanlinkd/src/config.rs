@@ -11,7 +11,7 @@
 //! password_file = "/etc/lanlink/gaming-night.secret"
 //! bind = "0.0.0.0:9000"
 //! tap = "lanlink0"
-//! mtu = 1400
+//! mtu = 1222
 //! stun_servers = ["stun.l.google.com:19302"]
 //!
 //! [gateway]
@@ -178,7 +178,7 @@ fn default_tap() -> String {
     "lanlink0".to_string()
 }
 fn default_mtu() -> usize {
-    1400
+    lanlink_types::RECOMMENDED_MTU
 }
 
 /// Fully-resolved settings for `lanlinkd run`.
@@ -283,6 +283,14 @@ pub fn load(path: &str, cli: &CliOverrides) -> Result<RunConfig, ConfigError> {
     resolve(&file, cli)
 }
 
+/// Resolve the telemetry endpoint only when telemetry is enabled.
+fn resolve_telemetry_endpoint(file: &FileConfig, coordinator: &str) -> String {
+    file.telemetry
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| format!("{}/telemetry", coordinator.trim_end_matches('/')))
+}
+
 /// Merge a parsed file config with CLI overrides. Public for tests.
 pub fn resolve(file: &FileConfig, cli: &CliOverrides) -> Result<RunConfig, ConfigError> {
     let coordinator = cli
@@ -333,11 +341,15 @@ pub fn resolve(file: &FileConfig, cli: &CliOverrides) -> Result<RunConfig, Confi
         ));
     }
 
-    let telemetry_endpoint = file
-        .telemetry
-        .endpoint
-        .clone()
-        .unwrap_or_else(|| format!("{}/telemetry", coordinator.trim_end_matches('/')));
+    let telemetry = if file.telemetry.enabled {
+        TelemetrySettings {
+            enabled: true,
+            endpoint: resolve_telemetry_endpoint(file, &coordinator),
+            interval: std::time::Duration::from_secs(file.telemetry.interval_hours.max(1) * 3600),
+        }
+    } else {
+        TelemetrySettings::default()
+    };
 
     Ok(RunConfig {
         coordinator,
@@ -362,11 +374,7 @@ pub fn resolve(file: &FileConfig, cli: &CliOverrides) -> Result<RunConfig, Confi
                 .unwrap_or_else(|| lanlink_proto::update::DEFAULT_MANIFEST_URL.to_string()),
             interval: std::time::Duration::from_secs(file.update.interval_hours.max(1) * 3600),
         },
-        telemetry: TelemetrySettings {
-            enabled: file.telemetry.enabled,
-            endpoint: telemetry_endpoint,
-            interval: std::time::Duration::from_secs(file.telemetry.interval_hours.max(1) * 3600),
-        },
+        telemetry,
         status_socket: cli
             .status_socket
             .clone()
@@ -409,7 +417,7 @@ password = "hunter2"
         assert_eq!(cfg.network_id, 7);
         assert_eq!(cfg.password, "hunter2");
         assert_eq!(cfg.tap, "lanlink0");
-        assert_eq!(cfg.mtu, 1400);
+        assert_eq!(cfg.mtu, lanlink_types::RECOMMENDED_MTU);
         assert_eq!(cfg.bind.port(), 9000);
         assert!(!cfg.gateway);
     }
@@ -592,7 +600,7 @@ phys_interface = "enp3s0"
         let file: FileConfig = toml::from_str(MINIMAL).unwrap();
         let cfg = resolve(&file, &CliOverrides::default()).unwrap();
         assert!(!cfg.telemetry.enabled);
-        assert_eq!(cfg.telemetry.endpoint, "http://localhost:8080/telemetry");
+        assert!(cfg.telemetry.endpoint.is_empty());
         assert_eq!(
             cfg.telemetry.interval,
             std::time::Duration::from_secs(24 * 3600)

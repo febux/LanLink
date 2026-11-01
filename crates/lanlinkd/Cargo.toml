@@ -19,9 +19,12 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json", "std"
 anyhow.workspace = true
 reqwest.workspace = true
 rand.workspace = true
+dirs = "5"
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 lanlink-proto = { path = "../lanlink-proto" }
+lanlink-types = { path = "../lanlink-types" }
 lanlink-crypto = { path = "../lanlink-crypto" }
 lanlink-tap = { path = "../lanlink-tap" }
 lanlink-switch = { path = "../lanlink-switch" }
@@ -39,3 +42,6 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
 windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock"] }
+
+[lints]
+workspace = true

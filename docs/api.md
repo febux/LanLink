@@ -53,12 +53,19 @@ Join an existing network.
 
 ## `GET /networks/:id/members`
 
-List current members. In v1.0 this endpoint is intentionally unauthenticated;
-production deployments should gate it with the same password used at join time.
+List current members. Requires the network password via the `Authorization`
+header (plain password or `Bearer <password>`), the `?password=...` query
+parameter, or a JSON body `{ "password": "..." }`. Returns `401 Unauthorized`
+when the password is missing or invalid.
 
 ## `POST /networks/:id/candidates`
 
-Submit local candidates and receive the latest peer list.
+Submit local candidates and receive the latest peer list. Requires the network
+password via the `Authorization` header (plain password or `Bearer <password>`)
+or the `?password=...` query parameter. The request body is a
+`PresenceUpdate` and the `node_id` must already be a member of the network.
+Returns `401 Unauthorized` for missing/invalid passwords and `403 Forbidden`
+when the node is not a member.
 
 ## `GET /directory`
 

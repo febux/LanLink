@@ -96,7 +96,7 @@ The coordinator exposes a JSON REST API:
 |---|---|---|
 | POST | `/networks` | Create a network. |
 | POST | `/networks/:id/join` | Join a network with name+password. |
-| GET | `/networks/:id/members` | List current members and candidates. |
+| GET | `/networks/:id/members` | List current members and candidates (requires network password). |
 | POST | `/networks/:id/candidates` | Update local candidates, fetch peer list. |
 | GET | `/directory` | List public/gaming networks. |
 | POST | `/telemetry` | Submit an opt-in anonymized telemetry report. |

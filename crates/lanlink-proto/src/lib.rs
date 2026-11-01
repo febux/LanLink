@@ -11,52 +11,87 @@ pub mod update;
 /// Current protocol version.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Data-plane wire format version.
-pub const WIRE_PROTOCOL_VERSION: u8 = 1;
-
-/// Data-plane packet types.
-pub const DATA_PACKET_TYPE: u8 = 1;
-pub const PING_PACKET_TYPE: u8 = 2;
-pub const PONG_PACKET_TYPE: u8 = 3;
-pub const PUNCH_PROBE_PACKET_TYPE: u8 = 4;
-pub const PUNCH_REPLY_PACKET_TYPE: u8 = 5;
-pub const KEEPALIVE_PACKET_TYPE: u8 = 6;
-/// Noise protocol handshake message.
-pub const NOISE_HANDSHAKE_PACKET_TYPE: u8 = 7;
-
-/// Outer header flag: packet payload is encrypted with a Noise transport session
-/// rather than the network-wide PSK.
-pub const FLAG_NOISE: u8 = 0x01;
-/// Outer header flag mask reserved for future use.
-pub const FLAG_RESERVED_MASK: u8 = 0xfe;
-
-/// Node identifier length in bytes.
-pub const NODE_ID_LEN: usize = 8;
-
-/// Target UDP payload size. We stay well below the IPv4 typical path MTU so that
-/// the OS never fragments our outer datagrams; Ethernet frames larger than the
-/// inner capacity are split by LanLink's own chunker/reassembler.
-pub const MAX_UDP_PAYLOAD: usize = 1300;
-
-/// Maximum size of the AEAD plaintext for a DATA packet given the current
-/// 4-byte header + 8-byte receiver id + 12-byte nonce + 16-byte Poly1305 tag.
-pub const MAX_INNER_PAYLOAD: usize = MAX_UDP_PAYLOAD - 4 - NODE_ID_LEN - 12 - 16;
-
 /// Network identifier (stable, coordinator-assigned).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NetworkId(pub u64);
 
-/// Node identifier (Ed25519 public key hash / random stable id).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct NodeId(pub [u8; 8]);
+use lanlink_types::{NodeId, VirtualIp};
 
-/// A virtual IP address inside a LanLink network.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct VirtualIp(pub std::net::Ipv4Addr);
+/// Newtype wrapper for a secret string (e.g. a network password).
+///
+/// `Debug` and `Display` print a redacted placeholder to avoid leaking
+/// secrets into logs or panic messages. Serialization/deserialization
+/// pass through to the underlying string for wire compatibility.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SecretString(String);
 
-impl std::fmt::Display for VirtualIp {
+impl SecretString {
+    /// Wrap an existing string.
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
+
+    /// Borrow the secret as a plain string.
+    ///
+    /// Only use this when the value is needed for computation; never log it.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume the wrapper and return the underlying string.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for SecretString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        f.write_str("[REDACTED]")
+    }
+}
+
+impl std::fmt::Display for SecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+impl Default for SecretString {
+    fn default() -> Self {
+        Self(String::new())
+    }
+}
+
+impl From<String> for SecretString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for SecretString {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<SecretString> for String {
+    fn from(s: SecretString) -> Self {
+        s.0
+    }
+}
+
+impl AsRef<str> for SecretString {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for SecretString {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
     }
 }
 
@@ -64,7 +99,7 @@ impl std::fmt::Display for VirtualIp {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct CreateNetworkRequest {
     pub name: String,
-    pub password: String,
+    pub password: SecretString,
     /// Mark the network as public/gaming; inbound firewall drops dangerous
     /// ports (SMB, RDP, SSH, etc.) by default.
     #[serde(default)]
@@ -85,7 +120,7 @@ pub struct CreateNetworkResponse {
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ResolveNetworkRequest {
     pub name: String,
-    pub password: String,
+    pub password: SecretString,
     #[serde(default)]
     pub is_public: bool,
 }
@@ -104,7 +139,7 @@ pub struct ResolveNetworkResponse {
 /// Request to join an existing network.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct JoinNetworkRequest {
-    pub password: String,
+    pub password: SecretString,
     pub node_id: NodeId,
     pub public_key: Vec<u8>,
     pub direct_candidates: Vec<std::net::SocketAddr>,
@@ -136,6 +171,10 @@ pub struct JoinNetworkResponse {
     /// Whether the network is flagged public/gaming, which enables the inbound
     /// firewall profile by default.
     pub is_public: bool,
+    /// Virtual subnet assigned by the coordinator, in CIDR notation (e.g.
+    /// "26.1.2.0/24`). The daemon uses this instead of hard-coding a /24.
+    #[serde(default)]
+    pub subnet: String,
 }
 
 /// Minimal peer metadata broadcast by the coordinator.
@@ -211,14 +250,36 @@ pub struct RelayBind {
     pub node_id: NodeId,
 }
 
-/// Relay keep-alive / bind message wire constants.
-pub const RELAY_MAGIC: &[u8] = b"LLR\x01";
-pub const RELAY_BIND_PACKET_TYPE: u8 = 1;
-pub const RELAY_KEEPALIVE_PACKET_TYPE: u8 = 2;
-
 /// Daemon-to-coordinator notification that this node is leaving the network.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LeaveNetworkRequest {
-    pub password: String,
+    pub password: SecretString,
     pub node_id: NodeId,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secret_string_debug_display_redacted() {
+        let s = SecretString::new("hunter2");
+        assert_eq!(format!("{:?}", s), "[REDACTED]");
+        assert_eq!(format!("{}", s), "[REDACTED]");
+    }
+
+    #[test]
+    fn secret_string_serializes_as_plain_string() {
+        let s = SecretString::new("secret");
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, "\"secret\"");
+        let back: SecretString = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.as_str(), "secret");
+    }
+
+    #[test]
+    fn secret_string_deserializes_from_string() {
+        let s: SecretString = serde_json::from_str("\"plain\"").unwrap();
+        assert_eq!(s.as_str(), "plain");
+    }
 }

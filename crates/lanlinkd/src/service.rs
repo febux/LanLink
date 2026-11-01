@@ -306,7 +306,7 @@ async fn up(
 
     // Ensure the service user can read both files when invoked as root.
     #[cfg(target_os = "linux")]
-    if unsafe { libc::getuid() } == 0 {
+    if nix::unistd::getuid().is_root() {
         let _ = nix::unistd::chown(
             platform::CONFIG_DIR,
             Some(nix::unistd::Uid::from_raw(0)),

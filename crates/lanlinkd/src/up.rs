@@ -26,11 +26,11 @@ pub async fn resolve_config(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .expect("failed to build http client");
+        .map_err(|e| anyhow::anyhow!("failed to build http client: {e}"))?;
 
     let req = lanlink_proto::ResolveNetworkRequest {
         name,
-        password,
+        password: password.into(),
         is_public,
     };
     let resp: lanlink_proto::ResolveNetworkResponse = client
@@ -57,7 +57,7 @@ pub async fn resolve_config(
     let cli = CliOverrides {
         coordinator: Some(coordinator),
         network_id: Some(resp.network_id.0),
-        password: Some(req.password),
+        password: Some(req.password.into_string()),
         bind,
         tap,
         mtu,

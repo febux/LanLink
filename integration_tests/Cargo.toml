@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+lanlink-types = { path = "../crates/lanlink-types" }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }

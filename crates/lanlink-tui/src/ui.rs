@@ -179,11 +179,11 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
     .split(cols[1]);
 
     let (tx_now, rx_now) = (
-        app.tx_rate.last().copied().unwrap_or(0),
-        app.rx_rate.last().copied().unwrap_or(0),
+        app.tx_rate.back().copied().unwrap_or(0),
+        app.rx_rate.back().copied().unwrap_or(0),
     );
     let tx = Sparkline::default()
-        .data(&app.tx_rate)
+        .data(&app.tx_rate.iter().copied().collect::<Vec<_>>())
         .style(Style::new().fg(Color::Green))
         .block(
             Block::new()
@@ -193,7 +193,7 @@ fn draw_dashboard(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(tx, right_rows[0]);
 
     let rx = Sparkline::default()
-        .data(&app.rx_rate)
+        .data(&app.rx_rate.iter().copied().collect::<Vec<_>>())
         .style(Style::new().fg(Color::Cyan))
         .block(
             Block::new()

@@ -27,7 +27,7 @@ async fn coordinator_create_join_list_members() {
         .post(format!("{base}/networks"))
         .json(&lanlink_proto::CreateNetworkRequest {
             name: "coord-api-test".to_string(),
-            password: "secret".to_string(),
+            password: "secret".into(),
             is_public: false,
         })
         .send()
@@ -42,8 +42,8 @@ async fn coordinator_create_join_list_members() {
     let join: lanlink_proto::JoinNetworkResponse = client
         .post(format!("{base}/networks/{network_id}/join"))
         .json(&lanlink_proto::JoinNetworkRequest {
-            password: "secret".to_string(),
-            node_id: lanlink_proto::NodeId([1u8; 8]),
+            password: "secret".into(),
+            node_id: lanlink_types::NodeId([1u8; 8]),
             public_key: vec![],
             direct_candidates: vec!["127.0.0.1:9001".parse().unwrap()],
             relay_candidates: vec![],
@@ -63,8 +63,8 @@ async fn coordinator_create_join_list_members() {
     let join_b: lanlink_proto::JoinNetworkResponse = client
         .post(format!("{base}/networks/{network_id}/join"))
         .json(&lanlink_proto::JoinNetworkRequest {
-            password: "secret".to_string(),
-            node_id: lanlink_proto::NodeId([2u8; 8]),
+            password: "secret".into(),
+            node_id: lanlink_types::NodeId([2u8; 8]),
             public_key: vec![],
             direct_candidates: vec!["127.0.0.1:9002".parse().unwrap()],
             relay_candidates: vec![],
@@ -80,11 +80,40 @@ async fn coordinator_create_join_list_members() {
         .expect("join b json");
     assert_eq!(join_b.peers.len(), 1);
 
-    let members: Vec<lanlink_proto::PeerInfo> = client
+    let resp = client
         .get(format!("{base}/networks/{network_id}/members"))
         .send()
         .await
+        .expect("list members no auth");
+    assert_eq!(resp.status().as_u16(), 401);
+
+    let resp = client
+        .get(format!("{base}/networks/{network_id}/members"))
+        .header("Authorization", "wrong")
+        .send()
+        .await
+        .expect("list members wrong auth");
+    assert_eq!(resp.status().as_u16(), 401);
+
+    let members: Vec<lanlink_proto::PeerInfo> = client
+        .get(format!("{base}/networks/{network_id}/members"))
+        .header("Authorization", "secret")
+        .send()
+        .await
         .expect("list members")
+        .json()
+        .await
+        .expect("members json");
+    assert_eq!(members.len(), 2);
+
+    // The password may also be supplied as a query parameter.
+    let members: Vec<lanlink_proto::PeerInfo> = client
+        .get(format!(
+            "{base}/networks/{network_id}/members?password=secret"
+        ))
+        .send()
+        .await
+        .expect("list members via query")
         .json()
         .await
         .expect("members json");
@@ -100,7 +129,7 @@ async fn coordinator_update_candidates_returns_peers() {
         .post(format!("{base}/networks"))
         .json(&lanlink_proto::CreateNetworkRequest {
             name: "candidate-test".to_string(),
-            password: "secret".to_string(),
+            password: "secret".into(),
             is_public: false,
         })
         .send()
@@ -118,8 +147,8 @@ async fn coordinator_update_candidates_returns_peers() {
         client
             .post(format!("{base}/networks/{network_id}/join"))
             .json(&lanlink_proto::JoinNetworkRequest {
-                password: "secret".to_string(),
-                node_id: lanlink_proto::NodeId(id),
+                password: "secret".into(),
+                node_id: lanlink_types::NodeId(id),
                 public_key: vec![],
                 direct_candidates: vec![format!("127.0.0.1:900{node}").parse().unwrap()],
                 relay_candidates: vec![],
@@ -136,7 +165,7 @@ async fn coordinator_update_candidates_returns_peers() {
         node_id: {
             let mut id = [0u8; 8];
             id[7] = 1;
-            lanlink_proto::NodeId(id)
+            lanlink_types::NodeId(id)
         },
         direct_candidates: vec![
             "127.0.0.1:9001".parse().unwrap(),
@@ -148,6 +177,7 @@ async fn coordinator_update_candidates_returns_peers() {
     };
     let peers: Vec<lanlink_proto::PeerInfo> = client
         .post(format!("{base}/networks/{network_id}/candidates"))
+        .header("Authorization", "Bearer secret")
         .json(&update)
         .send()
         .await
@@ -159,7 +189,7 @@ async fn coordinator_update_candidates_returns_peers() {
     let expected_b = {
         let mut id = [0u8; 8];
         id[7] = 2;
-        lanlink_proto::NodeId(id)
+        lanlink_types::NodeId(id)
     };
     assert_eq!(peers[0].node_id, expected_b);
 }
@@ -171,7 +201,7 @@ async fn coordinator_resolve_creates_and_reuses_network() {
 
     let req = lanlink_proto::ResolveNetworkRequest {
         name: "resolve-test".to_string(),
-        password: "secret".to_string(),
+        password: "secret".into(),
         is_public: true,
     };
 
@@ -201,7 +231,7 @@ async fn coordinator_resolve_creates_and_reuses_network() {
 
     let bad = lanlink_proto::ResolveNetworkRequest {
         name: "resolve-test".to_string(),
-        password: "wrong".to_string(),
+        password: "wrong".into(),
         is_public: true,
     };
     let resp = client

@@ -76,7 +76,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut app = App::new(args.coordinator.clone(), socket_desc);
 
-    let result = run_loop(&mut terminal,
+    let result = run_loop(
+        &mut terminal,
         &mut app,
         event_rx,
         event_tx.clone(),

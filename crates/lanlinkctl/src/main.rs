@@ -1,5 +1,6 @@
 use base64::Engine;
 use clap::{Parser, Subcommand};
+use lanlink_types::RECOMMENDED_MTU;
 use rand::RngCore;
 use std::net::SocketAddr;
 
@@ -70,7 +71,7 @@ enum DaemonCmd {
         bind: SocketAddr,
         #[arg(long, default_value = "lanlink0")]
         tap: String,
-        #[arg(long, default_value = "1400")]
+        #[arg(long, default_value_t = RECOMMENDED_MTU)]
         mtu: usize,
         /// Comma-separated list of STUN servers (empty means disable STUN).
         #[arg(long, value_delimiter = ',')]
@@ -141,6 +142,8 @@ enum CoordCmd {
         coordinator: String,
         #[arg(short, long)]
         network_id: u64,
+        #[arg(short, long)]
+        password: String,
     },
     /// Show aggregated telemetry metrics (operator view).
     Metrics {
@@ -165,11 +168,9 @@ async fn run(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {
         Cmd::Daemon(sub) => match sub {
             DaemonCmd::Status { socket, json } => {
-                let resp = control::send_request(
-                    lanlink_proto::control::ControlRequest::Status,
-                    socket,
-                )
-                .await?;
+                let resp =
+                    control::send_request(lanlink_proto::control::ControlRequest::Status, socket)
+                        .await?;
                 match resp {
                     lanlink_proto::control::ControlResponse::Ok {
                         result: lanlink_proto::control::ControlResult::Status(snap),
@@ -223,7 +224,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<()> {
                 let req = lanlink_proto::control::ControlRequest::Connect {
                     coordinator,
                     network_id,
-                    password,
+                    password: password.into(),
                     bind,
                     tap,
                     mtu,
@@ -246,7 +247,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Version => {
             println!("lanlinkctl {}", env!("CARGO_PKG_VERSION"));
             println!("protocol {}", lanlink_proto::PROTOCOL_VERSION);
-            println!("wire {}", lanlink_proto::WIRE_PROTOCOL_VERSION);
+            println!("wire {}", lanlink_types::WIRE_PROTOCOL_VERSION);
         }
         Cmd::Update(UpdateCmd::Check { manifest, verbose }) => {
             let url =
@@ -301,7 +302,7 @@ async fn run(cmd: Cmd) -> anyhow::Result<()> {
         }) => {
             let req = lanlink_proto::CreateNetworkRequest {
                 name,
-                password,
+                password: password.into(),
                 is_public: public,
             };
             let resp: lanlink_proto::CreateNetworkResponse = client
@@ -327,8 +328,8 @@ async fn run(cmd: Cmd) -> anyhow::Result<()> {
             let mut node_id = [0u8; 8];
             rand::thread_rng().fill_bytes(&mut node_id);
             let req = lanlink_proto::JoinNetworkRequest {
-                password,
-                node_id: lanlink_proto::NodeId(node_id),
+                password: password.into(),
+                node_id: lanlink_types::NodeId(node_id),
                 public_key: vec![],
                 direct_candidates: vec![candidate],
                 relay_candidates: vec![],
@@ -363,9 +364,11 @@ async fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Coord(CoordCmd::List {
             coordinator,
             network_id,
+            password,
         }) => {
             let peers: Vec<lanlink_proto::PeerInfo> = client
                 .get(format!("{}/networks/{}/members", coordinator, network_id))
+                .header("Authorization", password)
                 .send()
                 .await?
                 .error_for_status()

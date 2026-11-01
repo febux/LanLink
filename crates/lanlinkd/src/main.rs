@@ -2,11 +2,14 @@ mod config;
 mod control;
 mod sdnotify;
 mod service;
+mod session;
 mod status;
+mod tasks;
 mod tcp;
 mod up;
 
 use clap::{Parser, Subcommand};
+use lanlink_types::RECOMMENDED_MTU;
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -151,7 +154,7 @@ enum Cmd {
         network_id: u64,
 
         /// Virtual NIC MTU.
-        #[arg(long, default_value = "1400")]
+        #[arg(long, default_value_t = RECOMMENDED_MTU)]
         mtu: usize,
     },
 
@@ -285,6 +288,12 @@ async fn main() {
             mtu,
         } => {
             spawn_os_signal_handlers();
+            let cancel = CancellationToken::new();
+            let shutdown_cancel = cancel.clone();
+            tokio::spawn(async move {
+                shutdown().wait().await;
+                shutdown_cancel.cancel();
+            });
             run_static_peer(
                 tap,
                 local_ip,
@@ -296,6 +305,7 @@ async fn main() {
                 password,
                 network_id,
                 mtu,
+                cancel,
             )
             .await
         }
@@ -407,7 +417,12 @@ async fn run_daemon_runtime(
     let mut session_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Auto-connect using the CLI/config-provided network on startup.
-    start_session(initial_cfg, &mut session_cancel, &mut session_handle, &state_tx);
+    start_session(
+        initial_cfg,
+        &mut session_cancel,
+        &mut session_handle,
+        &state_tx,
+    );
 
     loop {
         tokio::select! {
@@ -479,9 +494,9 @@ async fn handle_control_envelope(
         lanlink_proto::control::ControlRequest::Status => {
             let state = state_tx.borrow().clone();
             let snap = state.snapshot().await;
-            let _ = envelope
-                .resp
-                .send(ControlResponse::Ok { result: lanlink_proto::control::ControlResult::Status(snap) });
+            let _ = envelope.resp.send(ControlResponse::Ok {
+                result: lanlink_proto::control::ControlResult::Status(snap),
+            });
         }
         lanlink_proto::control::ControlRequest::Connect {
             coordinator,
@@ -501,7 +516,7 @@ async fn handle_control_envelope(
                 });
                 return;
             }
-            let cfg = match build_run_config(
+            let cfg = match build_run_config(ConnectParams {
                 coordinator,
                 network_id,
                 password,
@@ -512,7 +527,7 @@ async fn handle_control_envelope(
                 gateway,
                 shared_subnet,
                 phys_interface,
-            ) {
+            }) {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = envelope.resp.send(ControlResponse::Error {
@@ -558,10 +573,12 @@ async fn handle_control_envelope(
     }
 }
 
-fn build_run_config(
+/// Parameters for a control-socket `Connect` command.
+#[derive(Debug)]
+struct ConnectParams {
     coordinator: String,
     network_id: u64,
-    password: String,
+    password: lanlink_proto::SecretString,
     bind: std::net::SocketAddr,
     tap: String,
     mtu: usize,
@@ -569,23 +586,24 @@ fn build_run_config(
     gateway: bool,
     shared_subnet: String,
     phys_interface: String,
-) -> anyhow::Result<config::RunConfig> {
+}
+
+fn build_run_config(params: ConnectParams) -> anyhow::Result<config::RunConfig> {
     let file = config::FileConfig::default();
     let cli = config::CliOverrides {
-        coordinator: Some(coordinator),
-        network_id: Some(network_id),
-        password: Some(password),
-        bind: Some(bind),
-        tap: Some(tap),
-        mtu: Some(mtu),
-        stun_servers: Some(stun_servers),
-        gateway: Some(gateway),
-        shared_subnet: Some(shared_subnet).filter(|s| !s.is_empty()),
-        phys_interface: Some(phys_interface).filter(|s| !s.is_empty()),
+        coordinator: Some(params.coordinator),
+        network_id: Some(params.network_id),
+        password: Some(params.password.into_string()),
+        bind: Some(params.bind),
+        tap: Some(params.tap),
+        mtu: Some(params.mtu),
+        stun_servers: Some(params.stun_servers),
+        gateway: Some(params.gateway),
+        shared_subnet: Some(params.shared_subnet).filter(|s| !s.is_empty()),
+        phys_interface: Some(params.phys_interface).filter(|s| !s.is_empty()),
         status_socket: None,
     };
-    config::resolve(&file, &cli)
-        .map_err(|e| anyhow::anyhow!("configuration error: {e}"))
+    config::resolve(&file, &cli).map_err(|e| anyhow::anyhow!("configuration error: {e}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -600,6 +618,7 @@ async fn run_static_peer(
     password: String,
     network_id: u64,
     mtu: usize,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let netmask = prefix_to_netmask(prefix)?;
 
@@ -610,10 +629,10 @@ async fn run_static_peer(
         netmask,
     };
 
-    let nic = lanlink_tap::create_nic(config)?;
+    let nic = lanlink_tap::create_nic(config).await?;
     let nic = Arc::new(Mutex::new(nic));
 
-    let psk = lanlink_crypto::derive_network_psk(&password, network_id);
+    let psk = lanlink_crypto::derive_network_psk(&password, network_id)?;
     let local = node_id_from_u64(node_id);
     let peer = node_id_from_u64(peer_node_id);
     let mut switch = lanlink_switch::Switch::new(local, lanlink_crypto::StaticSession::new(psk));
@@ -632,7 +651,7 @@ async fn run_static_peer(
         "static peer running; press Ctrl-C to stop"
     );
 
-    start_packet_pump(nic, switch, socket, mtu).await
+    start_packet_pump(nic, switch, socket, mtu, cancel).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -675,41 +694,22 @@ async fn run_coordinated(
     // Bind the TCP listener early so we can advertise its address in the join
     // request. The UDP and TCP sockets can share the same port on Linux.
     let (tcp_in_tx, tcp_in_rx) = tokio::sync::mpsc::unbounded_channel::<(SocketAddr, Vec<u8>)>();
-    let (tcp_transport, tcp_addr) = tcp::TcpTransport::bind(bind, tcp_in_tx, &tracker, cancel.clone()).await?;
-    let tcp_candidates = lanlink_punch::gather_host_candidates(tcp_addr.port());
+    let (tcp_transport, tcp_addr) =
+        tcp::TcpTransport::bind(bind, tcp_in_tx, &tracker, cancel.clone()).await?;
 
-    let initial_candidates = lanlink_punch::gather_host_candidates(bind.port());
-    let join_req = lanlink_proto::JoinNetworkRequest {
-        password: password.clone(),
-        node_id: local,
-        public_key: identity.public_key().to_vec(),
-        direct_candidates: initial_candidates.iter().map(|c| c.addr).collect(),
-        relay_candidates: Vec::new(), // updated after we bind to the network relay
-        tcp_candidates: tcp_candidates.iter().map(|c| c.addr).collect(),
-        tcp_relay_candidates: Vec::new(),
-        shared_subnet: shared_subnet.clone(),
-    };
+    let resp = session::join_network(
+        &coordinator,
+        network_id,
+        &password,
+        bind,
+        tcp_addr,
+        &identity,
+        &client,
+        &shared_subnet,
+    )
+    .await?;
 
-    let url = format!("{}/networks/{}/join", coordinator, network_id);
-    let resp: lanlink_proto::JoinNetworkResponse = client
-        .post(&url)
-        .json(&join_req)
-        .send()
-        .await?
-        .error_for_status()
-        .map_err(|e| anyhow::anyhow!("coordinator join failed: {e}"))?
-        .json()
-        .await?;
-
-    tracing::info!(
-        network_id = resp.network_id.0,
-        assigned_ip = %resp.assigned_ip.0,
-        peer_count = resp.peers.len(),
-        relay_servers = ?resp.relay_servers,
-        "joined network via coordinator"
-    );
-
-    let prefix = 24; // coordinator assigns /24 subnets in M3
+    let prefix = parse_subnet_prefix(&resp.subnet)?;
     let netmask = prefix_to_netmask(prefix)?;
     let nic_config = lanlink_tap::NicConfig {
         name: tap_name.clone(),
@@ -718,7 +718,7 @@ async fn run_coordinated(
         netmask,
     };
 
-    let nic = lanlink_tap::create_nic(nic_config)?;
+    let nic = lanlink_tap::create_nic(nic_config).await?;
     let nic = Arc::new(Mutex::new(nic));
 
     // Apply per-network inbound firewall when the coordinator marks the
@@ -759,7 +759,7 @@ async fn run_coordinated(
         None
     };
 
-    let psk = lanlink_crypto::derive_network_psk(&password, network_id);
+    let psk = lanlink_crypto::derive_network_psk(&password, network_id)?;
     let session = lanlink_crypto::StaticSession::new(psk);
     let mut switch = lanlink_switch::Switch::new(local, session.clone());
     switch.set_identity(identity.clone());
@@ -840,7 +840,7 @@ async fn run_coordinated(
         stun_addrs,
     ));
 
-    let punching: Arc<Mutex<HashSet<lanlink_proto::NodeId>>> = Arc::new(Mutex::new(HashSet::new()));
+    let punching: Arc<Mutex<HashSet<lanlink_types::NodeId>>> = Arc::new(Mutex::new(HashSet::new()));
 
     // Publish the live session state to the persistent control/status socket.
     let registry = status::StatusRegistry::new();
@@ -869,6 +869,7 @@ async fn run_coordinated(
         coordinator.clone(),
         network_id,
         local,
+        password.clone(),
         client.clone(),
         puncher.clone(),
         switch.clone(),
@@ -893,6 +894,7 @@ async fn run_coordinated(
     let refresh_tcp = tcp_transport.clone();
     let refresh_tracker = tracker.clone();
     let refresh_cancel = cancel.clone();
+    let refresh_password = password.clone();
     tracker.spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         loop {
@@ -903,6 +905,7 @@ async fn run_coordinated(
                         &refresh_coordinator,
                         network_id,
                         local,
+                        refresh_password.as_str(),
                         &refresh_client,
                         &refresh_puncher,
                         &refresh_switch,
@@ -935,100 +938,30 @@ async fn run_coordinated(
     // low frequency. Disabled by default; no node id, network id, or IP is
     // included.
     if telemetry.enabled {
-        let endpoint = telemetry.endpoint.clone();
-        let interval = telemetry.interval;
-        let relay_servers = resp.relay_servers.clone();
-        let switch_for_telemetry = switch.clone();
-        let metrics_for_telemetry = metrics.clone();
-        let firewall_enabled = resp.is_public;
-        let telemetry_cancel = cancel.clone();
-        tracker.spawn(async move {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()
-                .expect("failed to build telemetry client");
-            let mut ticker = tokio::time::interval(interval);
-            loop {
-                tokio::select! {
-                    _ = telemetry_cancel.cancelled() => break,
-                    _ = ticker.tick() => {
-                        let report = build_telemetry_report(
-                            &start_time,
-                            &metrics_for_telemetry,
-                            &switch_for_telemetry,
-                            gateway,
-                            firewall_enabled,
-                            &relay_servers,
-                        );
-                        match client.post(&endpoint).json(&report).send().await {
-                            Ok(r) => {
-                                if r.status().is_success() {
-                                    tracing::debug!("telemetry report submitted");
-                                } else {
-                                    tracing::debug!(status = %r.status(), "telemetry submission rejected");
-                                }
-                            }
-                            Err(e) => tracing::debug!(error = %e, "telemetry submission failed"),
-                        }
-                    }
-                }
-            }
-        });
+        tasks::telemetry::spawn(
+            telemetry.endpoint.clone(),
+            telemetry.interval,
+            resp.relay_servers.clone(),
+            switch.clone(),
+            metrics.clone(),
+            gateway,
+            resp.is_public,
+            cancel.clone(),
+            &tracker,
+            start_time,
+        );
     }
 
     // Opt-in update channel: periodically fetch the release manifest and log
     // when a newer version is published. Disabled by default (no phone-home);
     // the daemon never downloads or executes anything by itself.
     if update.enabled {
-        let manifest_url = update.manifest.clone();
-        let interval = update.interval;
-        let update_cancel = cancel.clone();
-        tracker.spawn(async move {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()
-                .expect("failed to build update-check client");
-            let mut notified: Option<String> = None;
-            let mut ticker = tokio::time::interval(interval);
-            loop {
-                tokio::select! {
-                    _ = update_cancel.cancelled() => break,
-                    _ = ticker.tick() => {
-                        match client
-                            .get(&manifest_url)
-                            .send()
-                            .await
-                            .and_then(|r| r.error_for_status())
-                        {
-                            Ok(resp) => match resp.json::<lanlink_proto::update::UpdateManifest>().await {
-                                Ok(m) => {
-                                    if let lanlink_proto::update::UpdateCheck::Available {
-                                        latest, ..
-                                    } =
-                                        lanlink_proto::update::check_manifest(&m, env!("CARGO_PKG_VERSION"))
-                                    {
-                                        if notified.as_deref() != Some(latest.to_string().as_str()) {
-                                            tracing::info!(
-                                                running = env!("CARGO_PKG_VERSION"),
-                                                latest = %latest,
-                                                "update available on the release channel"
-                                            );
-                                            notified = Some(latest.to_string());
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::debug!(error = %e, "update manifest parse failed")
-                                }
-                            },
-                            Err(e) => {
-                                tracing::debug!(error = %e, "update check failed")
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        tasks::update::spawn(
+            update.manifest.clone(),
+            update.interval,
+            cancel.clone(),
+            &tracker,
+        );
     }
 
     // Tell the service manager we are up, then run until shutdown or disconnect.
@@ -1056,45 +989,18 @@ async fn run_coordinated(
     tracker.wait().await;
 
     // Best-effort leave notification before cleanup.
-    send_leave_notification(&client,
-        &coordinator,
-        network_id,
-        local,
-        &password,
+    send_leave_notification(&client, &coordinator, network_id, local, &password).await;
+
+    session::cleanup(
+        firewall_profile.as_ref(),
+        gateway_manager.as_ref(),
+        &route_manager,
+        nic,
+        &tap_name,
+        &state_tx,
+        watchdog,
     )
     .await;
-
-    // ---- Graceful shutdown/disconnect cleanup ---------------------------
-    // Undo everything that persists beyond the process (firewall table,
-    // MASQUERADE rule, pushed routes, TAP device) so no state leaks across
-    // restarts and a later reconnect is clean.
-    sdnotify::notify_stopping();
-    if let Some(watchdog) = watchdog {
-        watchdog.abort();
-    }
-    if let Some(fw) = &firewall_profile {
-        if let Err(e) = fw.clear().await {
-            tracing::warn!(error = %e, "failed to clear firewall on shutdown");
-        }
-    }
-    if let Some(gw) = &gateway_manager {
-        if let Err(e) = gw.disable().await {
-            tracing::warn!(error = %e, "failed to disable gateway mode on shutdown");
-        }
-    }
-    if let Err(e) = route_manager.sync_routes(&[]).await {
-        tracing::warn!(error = %e, "failed to remove routes on shutdown");
-    }
-    // Drop the TAP device explicitly so the interface/IP are released before
-    // the daemon reports itself as disconnected. `destroy_nic` is best-effort.
-    drop(nic);
-    if let Err(e) = lanlink_tap::destroy_nic(&tap_name) {
-        tracing::debug!(error = %e, tap = %tap_name, "TAP destroy failed or unnecessary");
-    }
-
-    // Publish the empty/disconnected state to the control/status socket.
-    let _ = state_tx.send_replace(control::empty_state());
-    tracing::info!("session cleanup complete");
 
     pump_result
 }
@@ -1103,11 +1009,11 @@ async fn send_leave_notification(
     client: &reqwest::Client,
     coordinator: &str,
     network_id: u64,
-    node_id: lanlink_proto::NodeId,
+    node_id: lanlink_types::NodeId,
     password: &str,
 ) {
     let req = lanlink_proto::LeaveNetworkRequest {
-        password: password.to_string(),
+        password: password.into(),
         node_id,
     };
     let url = format!("{}/networks/{}/leave", coordinator, network_id);
@@ -1129,7 +1035,7 @@ async fn send_leave_notification(
 /// `None` if no relay server was configured or reachable.
 async fn bind_to_relay(
     socket: &tokio::net::UdpSocket,
-    local: lanlink_proto::NodeId,
+    local: lanlink_types::NodeId,
     relay_servers: &[SocketAddr],
 ) -> Option<SocketAddr> {
     for addr in relay_servers {
@@ -1174,11 +1080,12 @@ fn parse_stun_servers(inputs: &[String]) -> anyhow::Result<Vec<SocketAddr>> {
 async fn refresh_candidates_and_punch(
     coordinator: &str,
     network_id: u64,
-    local_node: lanlink_proto::NodeId,
+    local_node: lanlink_types::NodeId,
+    password: &str,
     client: &reqwest::Client,
     puncher: &Arc<lanlink_punch::Puncher>,
     switch: &Arc<Mutex<lanlink_switch::Switch>>,
-    punching: &Arc<Mutex<HashSet<lanlink_proto::NodeId>>>,
+    punching: &Arc<Mutex<HashSet<lanlink_types::NodeId>>>,
     local_relay: Option<SocketAddr>,
     local_tcp_addr: SocketAddr,
     local_tcp_relay: Option<SocketAddr>,
@@ -1215,6 +1122,7 @@ async fn refresh_candidates_and_punch(
     let url = format!("{}/networks/{}/candidates", coordinator, network_id);
     let peers: Vec<lanlink_proto::PeerInfo> = client
         .post(&url)
+        .header("Authorization", format!("Bearer {}", password))
         .json(&update)
         .send()
         .await?
@@ -1228,6 +1136,7 @@ async fn refresh_candidates_and_punch(
         coordinator.to_string(),
         network_id,
         local_node,
+        password.to_string(),
         client.clone(),
         puncher.clone(),
         switch.clone(),
@@ -1246,11 +1155,12 @@ async fn refresh_candidates_and_punch(
 async fn punch_peers(
     coordinator: String,
     network_id: u64,
-    local_node: lanlink_proto::NodeId,
+    local_node: lanlink_types::NodeId,
+    password: String,
     client: reqwest::Client,
     puncher: Arc<lanlink_punch::Puncher>,
     switch: Arc<Mutex<lanlink_switch::Switch>>,
-    punching: Arc<Mutex<HashSet<lanlink_proto::NodeId>>>,
+    punching: Arc<Mutex<HashSet<lanlink_types::NodeId>>>,
     tcp_transport: tcp::TcpTransport,
     peers: Vec<lanlink_proto::PeerInfo>,
     tracker: &TaskTracker,
@@ -1273,6 +1183,7 @@ async fn punch_peers(
         let punching = punching.clone();
         let coordinator = coordinator.clone();
         let client = client.clone();
+        let password = password.clone();
         let tcp_transport = tcp_transport.clone();
         let peer_id = peer.node_id;
         let direct_candidates = peer.direct_candidates.clone();
@@ -1307,6 +1218,7 @@ async fn punch_peers(
                                 &coordinator,
                                 network_id,
                                 local_node,
+                                &password,
                                 &client,
                                 &puncher,
                                 &switch,
@@ -1357,11 +1269,12 @@ async fn punch_peers(
 async fn refresh_single_peer_candidates(
     coordinator: &str,
     network_id: u64,
-    local_node: lanlink_proto::NodeId,
+    local_node: lanlink_types::NodeId,
+    password: &str,
     client: &reqwest::Client,
     puncher: &Arc<lanlink_punch::Puncher>,
     switch: &Arc<Mutex<lanlink_switch::Switch>>,
-    target: lanlink_proto::NodeId,
+    target: lanlink_types::NodeId,
 ) -> anyhow::Result<()> {
     let candidates = puncher.gather_candidates().await;
     let update = lanlink_proto::PresenceUpdate {
@@ -1379,6 +1292,7 @@ async fn refresh_single_peer_candidates(
     let url = format!("{}/networks/{}/candidates", coordinator, network_id);
     let peers: Vec<lanlink_proto::PeerInfo> = client
         .post(&url)
+        .header("Authorization", format!("Bearer {}", password))
         .json(&update)
         .send()
         .await?
@@ -1415,7 +1329,7 @@ async fn start_coordinated_pump(
     tcp_transport: tcp::TcpTransport,
     tcp_incoming: tokio::sync::mpsc::UnboundedReceiver<(SocketAddr, Vec<u8>)>,
     puncher: Arc<lanlink_punch::Puncher>,
-    _punching: Arc<Mutex<HashSet<lanlink_proto::NodeId>>>,
+    _punching: Arc<Mutex<HashSet<lanlink_types::NodeId>>>,
     gateway_manager: Option<Arc<lanlink_gateway::GatewayManager>>,
     metrics: Arc<Metrics>,
     mtu: usize,
@@ -1500,12 +1414,12 @@ async fn start_coordinated_pump(
             let ptype = packet.get(1).copied().unwrap_or(0);
 
             match ptype {
-                lanlink_proto::PUNCH_PROBE_PACKET_TYPE => {
+                lanlink_types::PUNCH_PROBE_PACKET_TYPE => {
                     if let Err(e) = puncher_rx.on_punch_probe(from, packet).await {
                         tracing::debug!(%from, error = %e, "punch probe handling failed");
                     }
                 }
-                lanlink_proto::PUNCH_REPLY_PACKET_TYPE => {
+                lanlink_types::PUNCH_REPLY_PACKET_TYPE => {
                     match puncher_rx.on_punch_reply(from, packet) {
                         Ok(Some(path)) => {
                             tracing::info!(
@@ -1521,8 +1435,8 @@ async fn start_coordinated_pump(
                         }
                     }
                 }
-                _ => match switch_rx.lock().await.on_packet(from, packet) {
-                    Ok(lanlink_switch::UdpOutcome::Frame(frame)) => {
+                _ => match switch_rx.lock().await.on_inbound_packet(from, packet) {
+                    Ok(lanlink_switch::InboundOutcome::Frame(frame)) => {
                         // Gateway mode: intercept ARP requests for the shared
                         // subnet and reply on behalf of the physical LAN.
                         let out_frame = if let Some(ref gw) = gateway_rx {
@@ -1536,18 +1450,18 @@ async fn start_coordinated_pump(
                             tracing::trace!(bytes = out_frame.len(), "wrote decrypted frame");
                         }
                     }
-                    Ok(lanlink_switch::UdpOutcome::Reply(reply)) => {
+                    Ok(lanlink_switch::InboundOutcome::Reply(reply)) => {
                         // Latency-probe PONG: route it straight back.
                         if let Err(e) = socket_rx.send_to(&reply, from).await {
                             tracing::debug!(%from, error = %e, "probe reply send failed");
                         }
                     }
-                    Ok(lanlink_switch::UdpOutcome::HandshakeReply(reply)) => {
+                    Ok(lanlink_switch::InboundOutcome::HandshakeReply(reply)) => {
                         if let Err(e) = socket_rx.send_to(&reply, from).await {
                             tracing::debug!(%from, error = %e, "handshake reply send failed");
                         }
                     }
-                    Ok(lanlink_switch::UdpOutcome::Ignored) => {
+                    Ok(lanlink_switch::InboundOutcome::Ignored) => {
                         tracing::trace!(%from, "dropped/fragment not ready/keepalive");
                     }
                     Err(e) => {
@@ -1569,8 +1483,8 @@ async fn start_coordinated_pump(
     let gateway_tcp = gateway_manager.clone();
     set.spawn(async move {
         while let Some((from, packet)) = tcp_rx.recv().await {
-            match switch_tcp.lock().await.on_packet(from, &packet) {
-                Ok(lanlink_switch::UdpOutcome::Frame(frame)) => {
+            match switch_tcp.lock().await.on_inbound_packet(from, &packet) {
+                Ok(lanlink_switch::InboundOutcome::Frame(frame)) => {
                     let out_frame = if let Some(ref gw) = gateway_tcp {
                         gw.process_inbound_frame(&frame).unwrap_or(frame)
                     } else {
@@ -1582,13 +1496,13 @@ async fn start_coordinated_pump(
                         tracing::trace!(bytes = out_frame.len(), "wrote decrypted frame");
                     }
                 }
-                Ok(lanlink_switch::UdpOutcome::Reply(reply)) => {
+                Ok(lanlink_switch::InboundOutcome::Reply(reply)) => {
                     tcp_reply.send(from, reply);
                 }
-                Ok(lanlink_switch::UdpOutcome::HandshakeReply(reply)) => {
+                Ok(lanlink_switch::InboundOutcome::HandshakeReply(reply)) => {
                     tcp_reply.send(from, reply);
                 }
-                Ok(lanlink_switch::UdpOutcome::Ignored) => {
+                Ok(lanlink_switch::InboundOutcome::Ignored) => {
                     tracing::trace!(%from, "dropped/fragment not ready/keepalive");
                 }
                 Err(e) => {
@@ -1710,14 +1624,23 @@ async fn start_packet_pump(
     switch: Arc<Mutex<lanlink_switch::Switch>>,
     socket: Arc<tokio::net::UdpSocket>,
     mtu: usize,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
+    // Track the pump tasks so we can wait for them to finish and release the
+    // TAP device and UDP socket before the caller re-binds the same ports.
+    let tracker = TaskTracker::new();
+
     // TAP -> UDP
+    let cancel_tx = cancel.clone();
     let nic_tx = nic.clone();
     let switch_tx = switch.clone();
     let socket_tx = socket.clone();
-    let mut tx_task = tokio::spawn(async move {
+    let mut tx_task = tracker.spawn(async move {
         let mut buf = vec![0u8; mtu + 128];
         loop {
+            if cancel_tx.is_cancelled() {
+                break;
+            }
             let n = match nic_tx.lock().await.read_frame(&mut buf).await {
                 Ok(0) => {
                     tracing::warn!("TAP returned 0 bytes");
@@ -1747,13 +1670,17 @@ async fn start_packet_pump(
     });
 
     // UDP -> TAP
+    let cancel_rx = cancel.clone();
     let nic_rx = nic.clone();
     let switch_rx = switch.clone();
     let socket_rx = socket.clone();
-    let mut rx_task = tokio::spawn(async move {
+    let mut rx_task = tracker.spawn(async move {
         let mut buf = vec![0u8; mtu + 256];
         loop {
-            let (n, from) = match socket_rx.recv_from(&mut buf).await {
+            let (n, from) = match tokio::select! {
+                _ = cancel_rx.cancelled() => break,
+                res = socket_rx.recv_from(&mut buf) => res,
+            } {
                 Ok(r) => r,
                 Err(e) if is_udp_icmp_reset(&e) => {
                     tracing::debug!(error = %e, "UDP recv reset by ICMP; continuing");
@@ -1765,25 +1692,25 @@ async fn start_packet_pump(
                 }
             };
             let packet = &buf[..n];
-            match switch_rx.lock().await.on_packet(from, packet) {
-                Ok(lanlink_switch::UdpOutcome::Frame(frame)) => {
+            match switch_rx.lock().await.on_inbound_packet(from, packet) {
+                Ok(lanlink_switch::InboundOutcome::Frame(frame)) => {
                     if let Err(e) = nic_rx.lock().await.write_frame(&frame).await {
                         tracing::error!(error = %e, "TAP write failed");
                     } else {
                         tracing::trace!(bytes = frame.len(), "wrote decrypted frame");
                     }
                 }
-                Ok(lanlink_switch::UdpOutcome::Reply(reply)) => {
+                Ok(lanlink_switch::InboundOutcome::Reply(reply)) => {
                     if let Err(e) = socket_rx.send_to(&reply, from).await {
                         tracing::debug!(%from, error = %e, "probe reply send failed");
                     }
                 }
-                Ok(lanlink_switch::UdpOutcome::HandshakeReply(reply)) => {
+                Ok(lanlink_switch::InboundOutcome::HandshakeReply(reply)) => {
                     if let Err(e) = socket_rx.send_to(&reply, from).await {
                         tracing::debug!(%from, error = %e, "handshake reply send failed");
                     }
                 }
-                Ok(lanlink_switch::UdpOutcome::Ignored) => {
+                Ok(lanlink_switch::InboundOutcome::Ignored) => {
                     tracing::trace!(%from, "dropped/fragment not ready");
                 }
                 Err(e) => {
@@ -1794,102 +1721,21 @@ async fn start_packet_pump(
     });
 
     tokio::select! {
-        _ = shutdown().wait() => {
+        _ = cancel.cancelled() => {
             tracing::info!("shutting down");
-            tx_task.abort();
-            rx_task.abort();
         }
         _ = &mut tx_task => {}
         _ = &mut rx_task => {}
     }
 
+    // Stop accepting new tasks and wait for the running ones to finish so
+    // the TAP device and UDP socket are released before re-binding.
+    tracker.close();
+    tx_task.abort();
+    rx_task.abort();
+    tracker.wait().await;
+
     Ok(())
-}
-
-fn build_telemetry_report(
-    start_time: &Instant,
-    metrics: &Metrics,
-    switch: &Arc<Mutex<lanlink_switch::Switch>>,
-    gateway_enabled: bool,
-    firewall_enabled: bool,
-    relay_servers: &[SocketAddr],
-) -> lanlink_proto::telemetry::TelemetryReport {
-    let addrs = {
-        let sw = switch.blocking_lock();
-        sw.peer_addrs()
-    };
-    let peer_count = addrs.len() as u32;
-    let relay_set: std::collections::HashSet<SocketAddr> = relay_servers.iter().copied().collect();
-    let relay_peer_count = addrs
-        .iter()
-        .filter(|(_, addr)| relay_set.contains(addr))
-        .count() as u32;
-    let direct_peer_count = peer_count.saturating_sub(relay_peer_count);
-
-    let uptime_seconds = start_time.elapsed().as_secs();
-    let timestamp = format_utc_rfc3339();
-
-    lanlink_proto::telemetry::TelemetryReport {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        platform: std::env::consts::ARCH.to_string() + "-" + std::env::consts::OS,
-        uptime_seconds,
-        peer_count,
-        direct_peer_count,
-        relay_peer_count,
-        gateway_enabled,
-        firewall_enabled,
-        tx_bytes: metrics.tx_bytes(),
-        rx_bytes: metrics.rx_bytes(),
-        timestamp,
-    }
-}
-
-fn format_utc_rfc3339() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-    let days_since_epoch = secs / 86400;
-    // 1970-01-01 was a Thursday; offset so day 0 = Thursday.
-    let mut year = 1970;
-    let mut remaining_days = days_since_epoch as i64;
-    loop {
-        let leap = is_leap_year(year);
-        let year_days = if leap { 366 } else { 365 };
-        if remaining_days < year_days {
-            break;
-        }
-        remaining_days -= year_days;
-        year += 1;
-    }
-    let (month, day) = day_of_year_to_month_day(remaining_days as u32, is_leap_year(year));
-    let hour = (secs % 86400) / 3600;
-    let min = (secs % 3600) / 60;
-    let sec = secs % 60;
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hour, min, sec
-    )
-}
-
-fn is_leap_year(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
-fn day_of_year_to_month_day(day: u32, leap: bool) -> (u32, u32) {
-    let days_in_month: &[u32] = if leap {
-        &[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        &[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut remaining = day;
-    for (i, &dim) in days_in_month.iter().enumerate() {
-        if remaining < dim {
-            return (i as u32 + 1, remaining + 1);
-        }
-        remaining -= dim;
-    }
-    (12, remaining + 1)
 }
 
 fn prefix_to_netmask(prefix: u8) -> anyhow::Result<std::net::Ipv4Addr> {
@@ -1905,6 +1751,23 @@ fn prefix_to_netmask(prefix: u8) -> anyhow::Result<std::net::Ipv4Addr> {
     // directly. Do NOT call `.to_be()` — on little-endian that swaps the bytes
     // and produces an invalid netmask such as 0.255.255.255 for /24.
     Ok(std::net::Ipv4Addr::from(bits))
+}
+
+/// Extract the IPv4 prefix length from a CIDR string such as `26.1.2.0/24`.
+/// Returns an error if the string is missing the `/` or the prefix is out of
+/// range, so the daemon fails loudly instead of silently defaulting to /24.
+fn parse_subnet_prefix(subnet: &str) -> anyhow::Result<u8> {
+    let prefix_str = subnet
+        .split('/')
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("subnet '{subnet}' is not in CIDR notation"))?;
+    let prefix: u8 = prefix_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid prefix in subnet '{subnet}': {e}"))?;
+    if prefix > 32 {
+        anyhow::bail!("prefix {prefix} in subnet '{subnet}' is out of range");
+    }
+    Ok(prefix)
 }
 
 /// Bind a UDP socket and disable ICMP "port unreachable" / "network
@@ -1992,6 +1855,17 @@ fn disable_udp_icmp_errors(socket: &std::net::UdpSocket) {
 }
 
 #[test]
+fn telemetry_timestamp_is_rfc3339_utc() {
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    assert!(ts.ends_with('Z'), "timestamp must end with UTC 'Z'");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&ts).is_ok(),
+        "timestamp must be a valid RFC3339 datetime: {}",
+        ts
+    );
+}
+
+#[test]
 fn prefix_to_netmask_common_prefixes() {
     assert_eq!(
         prefix_to_netmask(24).unwrap(),
@@ -2020,8 +1894,24 @@ fn prefix_to_netmask_common_prefixes() {
     assert!(prefix_to_netmask(33).is_err());
 }
 
-fn node_id_from_u64(v: u64) -> lanlink_proto::NodeId {
-    lanlink_proto::NodeId(v.to_be_bytes())
+#[test]
+fn parse_subnet_prefix_extracts_length() {
+    assert_eq!(parse_subnet_prefix("26.1.2.0/24").unwrap(), 24);
+    assert_eq!(parse_subnet_prefix("10.0.0.0/8").unwrap(), 8);
+    assert_eq!(parse_subnet_prefix("192.168.0.0/16").unwrap(), 16);
+    assert_eq!(parse_subnet_prefix("0.0.0.0/0").unwrap(), 0);
+    assert_eq!(parse_subnet_prefix("1.2.3.4/32").unwrap(), 32);
+}
+
+#[test]
+fn parse_subnet_prefix_rejects_invalid() {
+    assert!(parse_subnet_prefix("26.1.2.0").is_err());
+    assert!(parse_subnet_prefix("26.1.2.0/33").is_err());
+    assert!(parse_subnet_prefix("26.1.2.0/abc").is_err());
+}
+
+fn node_id_from_u64(v: u64) -> lanlink_types::NodeId {
+    lanlink_types::NodeId(v.to_be_bytes())
 }
 
 fn hex(b: &[u8]) -> String {
@@ -2052,12 +1942,19 @@ fn load_or_create_identity() -> anyhow::Result<lanlink_crypto::Identity> {
         p.push("identity.key");
         candidates.push(p);
     }
-    candidates.push(PathBuf::from("/tmp/lanlink_identity.key"));
+    if let Some(data_dir) = dirs::data_local_dir() {
+        candidates.push(data_dir.join("lanlink").join("identity.key"));
+    }
 
     let path = candidates
         .into_iter()
         .find(|p| p.exists() || p.parent().map(|d| d.exists()).unwrap_or(false))
-        .unwrap_or_else(|| PathBuf::from("/tmp/lanlink_identity.key"));
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no writable directory found for identity key; \
+                 set HOME/XDG_DATA_HOME or run with a configured data directory"
+            )
+        })?;
 
     if path.exists() {
         let bytes = fs::read(&path)?;

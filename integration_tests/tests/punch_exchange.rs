@@ -47,7 +47,7 @@ async fn punchers_verify_reply_path_via_coordinator_candidates() {
         .post(format!("{base}/networks"))
         .json(&lanlink_proto::CreateNetworkRequest {
             name: "punch-test".to_string(),
-            password: "secret".to_string(),
+            password: "secret".into(),
             is_public: false,
         })
         .send()
@@ -63,14 +63,14 @@ async fn punchers_verify_reply_path_via_coordinator_candidates() {
         client: &reqwest::Client,
         base: &str,
         network_id: u64,
-        node: lanlink_proto::NodeId,
+        node: lanlink_types::NodeId,
         direct: SocketAddr,
         relay: SocketAddr,
     ) {
         client
             .post(format!("{base}/networks/{network_id}/join"))
             .json(&lanlink_proto::JoinNetworkRequest {
-                password: "secret".to_string(),
+                password: "secret".into(),
                 node_id: node,
                 public_key: vec![],
                 direct_candidates: vec![direct],
@@ -100,6 +100,7 @@ async fn punchers_verify_reply_path_via_coordinator_candidates() {
     };
     let peers: Vec<lanlink_proto::PeerInfo> = client
         .post(format!("{base}/networks/{network_id}/candidates"))
+        .header("Authorization", "Bearer secret")
         .json(&update)
         .send()
         .await
@@ -139,7 +140,8 @@ async fn punchers_verify_reply_path_via_coordinator_candidates() {
         }
     });
 
-    // A sends a single authenticated PUNCH_PROBE to B's direct candidate.
+    // A starts a real punch attempt against B's direct candidate so the
+    // expected reply cookie is registered before we process the reply.
     let remote_candidates: Vec<Candidate> = peer_b
         .direct_candidates
         .into_iter()
@@ -150,21 +152,10 @@ async fn punchers_verify_reply_path_via_coordinator_candidates() {
         .collect();
     assert!(!remote_candidates.is_empty());
 
-    let cookie = 0xc0ffee_u64;
-    let mut probe_inner = Vec::with_capacity(lanlink_proto::NODE_ID_LEN + 8);
-    probe_inner.extend_from_slice(&local_a.0);
-    probe_inner.extend_from_slice(&cookie.to_be_bytes());
-    let probe = session
-        .seal(
-            local_b,
-            lanlink_proto::PUNCH_PROBE_PACKET_TYPE,
-            &probe_inner,
-        )
-        .expect("seal probe");
-    socket_a
-        .send_to(&probe, remote_candidates[0].addr)
-        .await
-        .expect("send probe");
+    let punch_handle = tokio::spawn({
+        let puncher_a = puncher_a.clone();
+        async move { puncher_a.punch_peer(local_b, remote_candidates).await }
+    });
 
     // Wait for B to process the probe.
     let _ = b_handle.await;
@@ -183,6 +174,8 @@ async fn punchers_verify_reply_path_via_coordinator_candidates() {
         .expect("reply accepted");
     assert_eq!(path.peer, local_b);
     assert_eq!(path.addr, addr_b);
+
+    punch_handle.abort();
 }
 
 #[tokio::test]
@@ -210,11 +203,11 @@ async fn relay_server_forwards_between_bound_clients() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut data = vec![0u8; 4 + lanlink_proto::NODE_ID_LEN + 4];
-    data[0] = lanlink_proto::WIRE_PROTOCOL_VERSION;
-    data[1] = lanlink_proto::DATA_PACKET_TYPE;
-    data[4..4 + lanlink_proto::NODE_ID_LEN].copy_from_slice(&node_b.0);
-    data[4 + lanlink_proto::NODE_ID_LEN..].copy_from_slice(b"ping");
+    let mut data = vec![0u8; 4 + lanlink_types::NODE_ID_LEN + 4];
+    data[0] = lanlink_types::WIRE_PROTOCOL_VERSION;
+    data[1] = lanlink_types::DATA_PACKET_TYPE;
+    data[4..4 + lanlink_types::NODE_ID_LEN].copy_from_slice(&node_b.0);
+    data[4 + lanlink_types::NODE_ID_LEN..].copy_from_slice(b"ping");
 
     socket_a.send_to(&data, relay_addr).await.unwrap();
 

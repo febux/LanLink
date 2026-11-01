@@ -11,15 +11,14 @@ name = "lanlink-tui"
 path = "src/main.rs"
 
 [dependencies]
+lanlink-types = { path = "../lanlink-types" }
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-# Windows status-socket discovery reads the daemon config's [status] table.
-toml.workspace = true
 reqwest.workspace = true
 rand.workspace = true
+lanlink-client = { path = "../lanlink-client" }
 lanlink-proto = { path = "../lanlink-proto" }
 ratatui.workspace = true
 crossterm.workspace = true

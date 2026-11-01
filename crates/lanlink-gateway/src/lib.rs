@@ -676,8 +676,8 @@ mod tests {
     fn gateway_routes_excludes_non_gateways() {
         let peers = vec![
             lanlink_proto::PeerInfo {
-                node_id: lanlink_proto::NodeId([1; 8]),
-                virtual_ip: lanlink_proto::VirtualIp("26.0.0.2".parse().unwrap()),
+                node_id: lanlink_types::NodeId([1; 8]),
+                virtual_ip: lanlink_types::VirtualIp("26.0.0.2".parse().unwrap()),
                 public_key: vec![],
                 direct_candidates: vec![],
                 relay_candidates: vec![],
@@ -687,8 +687,8 @@ mod tests {
                 shared_subnet: "10.0.0.0/24".to_string(),
             },
             lanlink_proto::PeerInfo {
-                node_id: lanlink_proto::NodeId([2; 8]),
-                virtual_ip: lanlink_proto::VirtualIp("26.0.0.3".parse().unwrap()),
+                node_id: lanlink_types::NodeId([2; 8]),
+                virtual_ip: lanlink_types::VirtualIp("26.0.0.3".parse().unwrap()),
                 public_key: vec![],
                 direct_candidates: vec![],
                 relay_candidates: vec![],

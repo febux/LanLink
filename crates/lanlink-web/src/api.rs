@@ -1,17 +1,14 @@
 //! HTTP API handlers and daemon status-socket client for `lanlink-web`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
-use lanlink_client::discover_socket;
-use lanlink_proto::status::{StatusRequest, StatusResponse, StatusSnapshot};
-use lanlink_proto::{
-    CreateNetworkRequest, CreateNetworkResponse, JoinNetworkRequest, JoinNetworkResponse, NodeId,
-    PublicNetworkInfo,
-};
+use lanlink_client::{discover_socket, fetch_snapshot};
+use lanlink_types::{NodeId};
+use lanlink_proto::{CreateNetworkRequest, CreateNetworkResponse, JoinNetworkRequest, JoinNetworkResponse, PublicNetworkInfo};
 use rand::RngCore;
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -61,11 +58,7 @@ pub async fn snapshot(State(state): State<AppState>) -> impl IntoResponse {
             Json(json!({"error": "no daemon status socket found"})),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": e}))).into_response(),
     }
 }
 
@@ -121,62 +114,8 @@ pub async fn join_network(
     }
 }
 
-/// Fetch one snapshot over the daemon's status socket.
-#[cfg(unix)]
-pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let mut stream = tokio::net::UnixStream::connect(path).await?;
-    let request = serde_json::to_string(&StatusRequest::Snapshot)?;
-    stream.write_all(request.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.shutdown().await?;
-
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
-    let text = std::str::from_utf8(&buf)?;
-    let line = text
-        .lines()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("empty response from daemon control socket"))?;
-    match serde_json::from_str::<StatusResponse>(line)? {
-        StatusResponse::Snapshot(snapshot) => Ok(snapshot),
-        StatusResponse::Error { error } => anyhow::bail!("daemon: {error}"),
-    }
-}
-
-/// Fetch one snapshot over the daemon's TCP loopback status socket (Windows).
-#[cfg(windows)]
-pub async fn fetch_snapshot(path: &Path) -> anyhow::Result<StatusSnapshot> {
-    use std::net::SocketAddr;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
-
-    let addr: SocketAddr = path
-        .to_str()
-        .and_then(|s| s.parse().ok())
-        .ok_or_else(|| anyhow::anyhow!("invalid TCP status address: {}", path.display()))?;
-
-    let mut stream = TcpStream::connect(addr).await?;
-    let request = serde_json::to_string(&StatusRequest::Snapshot)?;
-    stream.write_all(request.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.shutdown().await?;
-
-    let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).await?;
-    let text = std::str::from_utf8(&buf)?;
-    let line = text
-        .lines()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("empty response from daemon control socket"))?;
-    match serde_json::from_str::<StatusResponse>(line)? {
-        StatusResponse::Snapshot(snapshot) => Ok(snapshot),
-        StatusResponse::Error { error } => anyhow::bail!("daemon: {error}"),
-    }
-}
-
-// Socket discovery is provided by the shared `lanlink-client` crate.
+// Daemon status-socket I/O is delegated to the shared `lanlink-client` crate
+// (`fetch_snapshot`, `discover_socket`).
 
 /// List public networks from the coordinator directory.
 pub async fn list_directory(
@@ -231,123 +170,6 @@ async fn do_join(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lanlink_proto::status::{DaemonStatus, PathKind, PeerStatus};
-    use lanlink_proto::{NetworkId, VirtualIp};
-
-    fn canned_snapshot() -> StatusSnapshot {
-        StatusSnapshot {
-            status: DaemonStatus {
-                version: "0.1.0-test".into(),
-                pid: 1234,
-                network_id: NetworkId(42),
-                assigned_ip: VirtualIp("26.0.0.9".parse().unwrap()),
-                tap_name: "lanlink0".into(),
-                bind: "0.0.0.0:9000".parse().unwrap(),
-                relay_addr: None,
-                gateway_enabled: false,
-                firewall_enabled: false,
-                uptime_seconds: 99,
-                tx_bytes: 111,
-                rx_bytes: 222,
-                connected: true,
-            },
-            peers: vec![PeerStatus {
-                node_id: NodeId([7; 8]),
-                virtual_ip: VirtualIp("26.0.0.10".parse().unwrap()),
-                endpoint: Some("127.0.0.1:9100".parse().unwrap()),
-                path: PathKind::Direct,
-                latency_ms: Some(23),
-                last_seen_secs_ago: Some(2),
-                tx_bytes: 1,
-                rx_bytes: 2,
-                is_gateway: false,
-                shared_subnet: String::new(),
-            }],
-        }
-    }
-
-    /// Client side of the NDJSON protocol against a minimal fake daemon.
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn fetch_snapshot_round_trip() {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-        let dir = std::env::temp_dir().join(format!(
-            "lanlink-web-test-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("status.sock");
-        let _ = std::fs::remove_file(&path);
-
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
-        let snapshot = canned_snapshot();
-        let canned = serde_json::to_string(&StatusResponse::Snapshot(snapshot)).unwrap();
-
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            assert!(line.contains("snapshot"), "request was {line:?}");
-            let reply = reader.get_mut();
-            reply.write_all(canned.as_bytes()).await.unwrap();
-            reply.write_all(b"\n").await.unwrap();
-        });
-
-        let result = fetch_snapshot(&path).await.expect("fetch");
-        assert_eq!(result.status.network_id.0, 42);
-        assert_eq!(result.peers.len(), 1);
-        assert_eq!(result.peers[0].latency_ms, Some(23));
-
-        server.await.unwrap();
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[tokio::test]
-    #[cfg(unix)]
-    async fn empty_response_fails_cleanly() {
-        use tokio::io::AsyncReadExt;
-
-        let dir = std::env::temp_dir().join(format!(
-            "lanlink-web-empty-test-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("status.sock");
-        let _ = std::fs::remove_file(&path);
-
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            // Read the request to avoid RST, then close without replying.
-            let mut buf = [0u8; 256];
-            let _ = stream.read(&mut buf).await;
-        });
-
-        let err = fetch_snapshot(&path)
-            .await
-            .expect_err("must fail for empty response");
-        assert!(
-            err.to_string().contains("empty response from daemon control socket"),
-            "unexpected error: {err}"
-        );
-
-        server.await.unwrap();
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
-    }
-
-    #[tokio::test]
-    async fn missing_socket_fails_cleanly() {
-        let err = fetch_snapshot(Path::new("/nonexistent/lanlinkd-control.sock"))
-            .await
-            .expect_err("must fail");
-        assert!(!err.to_string().is_empty());
-    }
 
     #[tokio::test]
     async fn snapshot_endpoint_returns_503_when_daemon_unreachable() {

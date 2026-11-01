@@ -1,10 +1,29 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
+use sqlx::error::ErrorKind;
 use std::sync::Arc;
+
+fn is_unique_constraint_violation(err: &anyhow::Error) -> bool {
+    if let Some(sqlx::Error::Database(db)) = err.downcast_ref::<sqlx::Error>() {
+        db.kind() == ErrorKind::UniqueViolation
+    } else {
+        false
+    }
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct ListMembersQuery {
+    password: Option<String>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct ListMembersBody {
+    password: String,
+}
 
 pub struct AppState {
     pub pool: sqlx::SqlitePool,
@@ -54,7 +73,11 @@ pub async fn create_network(
         }
         Err(e) => {
             tracing::warn!(error = %e, "create network failed");
-            (StatusCode::CONFLICT, "network name may already exist").into_response()
+            if is_unique_constraint_violation(&e) {
+                (StatusCode::CONFLICT, "network name may already exist").into_response()
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response()
+            }
         }
     }
 }
@@ -147,17 +170,23 @@ pub async fn join_network(
             }
         };
 
+    let subnet = crate::db::get_network_subnet(&state.pool, network_id as i64)
+        .await
+        .unwrap_or_default()
+        .unwrap_or_default();
+
     let is_public = crate::db::get_network_is_public(&state.pool, network_id as i64)
         .await
         .unwrap_or(false);
 
     let resp = lanlink_proto::JoinNetworkResponse {
         network_id: lanlink_proto::NetworkId(network_id),
-        assigned_ip: lanlink_proto::VirtualIp(assigned_ip),
+        assigned_ip: lanlink_types::VirtualIp(assigned_ip),
         peers,
         relay_servers,
         tcp_relay_servers,
         is_public,
+        subnet,
     };
 
     (StatusCode::OK, Json(resp)).into_response()
@@ -175,11 +204,7 @@ pub async fn leave_network(
         return (StatusCode::NOT_FOUND, "network not found").into_response();
     }
 
-    let hash = match crate::db::get_network_password_hash(&state.pool,
-        network_id as i64,
-    )
-    .await
-    {
+    let hash = match crate::db::get_network_password_hash(&state.pool, network_id as i64).await {
         Ok(Some(h)) => h,
         Ok(None) => return (StatusCode::NOT_FOUND, "network not found").into_response(),
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response(),
@@ -190,8 +215,7 @@ pub async fn leave_network(
     }
 
     match crate::db::delete_member(&state.pool, network_id as i64, &req.node_id.0).await {
-        Ok(true) => (StatusCode::NO_CONTENT, "")
-            .into_response(),
+        Ok(true) => (StatusCode::NO_CONTENT, "").into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, "node not a member of this network").into_response(),
         Err(e) => {
             tracing::warn!(error = %e, "leave network failed");
@@ -203,10 +227,36 @@ pub async fn leave_network(
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     Path(network_id): Path<u64>,
+    headers: HeaderMap,
+    Query(query): Query<ListMembersQuery>,
+    body: Option<Json<ListMembersBody>>,
 ) -> impl IntoResponse {
-    // For M3 this endpoint is intentionally unauthenticated; it only returns virtual IPs
-    // and public candidates for members of the network. A production deployment should
-    // require the same auth token/password used at join time.
+    let password = match extract_password(
+        &headers,
+        query.password.as_deref(),
+        body.map(|Json(b)| b.password),
+    ) {
+        Some(p) => p,
+        None => return (StatusCode::UNAUTHORIZED, "missing authorization").into_response(),
+    };
+
+    if !crate::db::network_exists(&state.pool, network_id as i64)
+        .await
+        .unwrap_or(false)
+    {
+        return (StatusCode::NOT_FOUND, "network not found").into_response();
+    }
+
+    let hash = match crate::db::get_network_password_hash(&state.pool, network_id as i64).await {
+        Ok(Some(h)) => h,
+        Ok(None) => return (StatusCode::NOT_FOUND, "network not found").into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response(),
+    };
+
+    if !crate::db::verify_password(&password, &hash) {
+        return (StatusCode::UNAUTHORIZED, "invalid password").into_response();
+    }
+
     let peers = match crate::db::list_peers(&state.pool, network_id as i64, &[0u8; 8]).await {
         Ok(p) => p,
         Err(e) => {
@@ -216,6 +266,31 @@ pub async fn list_members(
     };
 
     Json(peers).into_response()
+}
+
+fn extract_password(
+    headers: &HeaderMap,
+    query_password: Option<&str>,
+    body_password: Option<String>,
+) -> Option<String> {
+    if let Some(auth) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        let auth = auth.trim();
+        let password = if auth.len() > 7 && auth[..7].eq_ignore_ascii_case("bearer ") {
+            &auth[7..]
+        } else {
+            auth
+        };
+        return Some(password.to_string());
+    }
+    if let Some(p) = query_password {
+        return Some(p.to_string());
+    }
+    body_password
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct UpdateCandidatesQuery {
+    password: Option<String>,
 }
 
 /// Resolve or create a network by name. If the network already exists and the
@@ -276,7 +351,11 @@ pub async fn resolve_network(
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "resolve create network failed");
-                    (StatusCode::CONFLICT, "network name may already exist").into_response()
+                    if is_unique_constraint_violation(&e) {
+                        (StatusCode::CONFLICT, "network name may already exist").into_response()
+                    } else {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response()
+                    }
                 }
             }
         }
@@ -326,13 +405,45 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 pub async fn update_candidates(
     State(state): State<Arc<AppState>>,
     Path(network_id): Path<u64>,
+    headers: HeaderMap,
+    Query(query): Query<UpdateCandidatesQuery>,
     Json(req): Json<lanlink_proto::PresenceUpdate>,
 ) -> impl IntoResponse {
+    let password = match extract_password(&headers, query.password.as_deref(), None) {
+        Some(p) => p,
+        None => return (StatusCode::UNAUTHORIZED, "missing authorization").into_response(),
+    };
+
     if !crate::db::network_exists(&state.pool, network_id as i64)
         .await
         .unwrap_or(false)
     {
         return (StatusCode::NOT_FOUND, "network not found").into_response();
+    }
+
+    let hash = match crate::db::get_network_password_hash(&state.pool, network_id as i64).await {
+        Ok(Some(h)) => h,
+        Ok(None) => return (StatusCode::NOT_FOUND, "network not found").into_response(),
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response(),
+    };
+
+    if !crate::db::verify_password(&password, &hash) {
+        return (StatusCode::UNAUTHORIZED, "invalid password").into_response();
+    }
+
+    match crate::db::is_member(&state.pool, network_id as i64, &req.node_id.0).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::FORBIDDEN,
+                "node is not a member of this network",
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "membership check failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "db error").into_response();
+        }
     }
 
     let direct_candidates_json = match serde_json::to_string(&req.direct_candidates) {

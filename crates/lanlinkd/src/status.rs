@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use lanlink_proto::status::{DaemonStatus, PathKind, PeerStatus, StatusSnapshot};
-use lanlink_proto::{NodeId, VirtualIp};
+use lanlink_types::{NodeId, VirtualIp};
 use lanlink_switch::Transport;
 use tokio::sync::Mutex;
 
@@ -481,16 +481,16 @@ mod tests {
                 Err(_) => break,
             }
 
-            let response = match serde_json::from_str::<lanlink_proto::status::StatusRequest>(
-                line.trim_end(),
-            ) {
-                Ok(lanlink_proto::status::StatusRequest::Snapshot) => {
-                    StatusResponse::Snapshot(state.snapshot().await)
-                }
-                Err(e) => StatusResponse::Error {
-                    error: format!("bad request: {e}"),
-                },
-            };
+            let response =
+                match serde_json::from_str::<lanlink_proto::status::StatusRequest>(line.trim_end())
+                {
+                    Ok(lanlink_proto::status::StatusRequest::Snapshot) => {
+                        StatusResponse::Snapshot(state.snapshot().await)
+                    }
+                    Err(e) => StatusResponse::Error {
+                        error: format!("bad request: {e}"),
+                    },
+                };
 
             let mut out = serde_json::to_string(&response)
                 .unwrap_or_else(|_| "{\"error\":\"snapshot encode failed\"}".to_string());
@@ -516,16 +516,16 @@ mod tests {
                 Err(_) => break,
             }
 
-            let response = match serde_json::from_str::<lanlink_proto::status::StatusRequest>(
-                line.trim_end(),
-            ) {
-                Ok(lanlink_proto::status::StatusRequest::Snapshot) => {
-                    StatusResponse::Snapshot(state.snapshot().await)
-                }
-                Err(e) => StatusResponse::Error {
-                    error: format!("bad request: {e}"),
-                },
-            };
+            let response =
+                match serde_json::from_str::<lanlink_proto::status::StatusRequest>(line.trim_end())
+                {
+                    Ok(lanlink_proto::status::StatusRequest::Snapshot) => {
+                        StatusResponse::Snapshot(state.snapshot().await)
+                    }
+                    Err(e) => StatusResponse::Error {
+                        error: format!("bad request: {e}"),
+                    },
+                };
 
             let mut out = serde_json::to_string(&response)
                 .unwrap_or_else(|_| "{\"error\":\"snapshot encode failed\"}".to_string());

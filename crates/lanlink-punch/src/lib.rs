@@ -15,8 +15,9 @@
 //! simple: one UDP socket per network, symmetric simultaneous open, and a
 //! small fixed set of STUN servers.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::net::UdpSocket;
@@ -58,16 +59,34 @@ pub type Result<T> = std::result::Result<T, PunchError>;
 /// A verified address change event produced by the puncher.
 #[derive(Debug, Clone)]
 pub struct VerifiedPath {
-    pub peer: lanlink_proto::NodeId,
+    pub peer: lanlink_types::NodeId,
     pub addr: SocketAddr,
 }
 
 /// Hole-punching engine tied to a single UDP socket and network key.
 pub struct Puncher {
-    local_node: lanlink_proto::NodeId,
+    local_node: lanlink_types::NodeId,
     socket: Arc<UdpSocket>,
     session: lanlink_crypto::StaticSession,
     stun_servers: Vec<SocketAddr>,
+    /// Expected PUNCH_REPLY cookies keyed by the peer we are currently trying
+    /// to reach. Keeping the cookie per-peer allows the daemon to punch
+    /// several peers concurrently through the same `Puncher` while still
+    /// rejecting stale or reflected replies for each individual peer.
+    expected_cookies: Mutex<HashMap<lanlink_types::NodeId, u64>>,
+}
+
+/// Removes the expected cookie for a peer when a punch attempt goes out of
+/// scope, so stale cookies do not accumulate.
+struct CookieGuard<'a> {
+    cookies: &'a Mutex<HashMap<lanlink_types::NodeId, u64>>,
+    peer: lanlink_types::NodeId,
+}
+
+impl<'a> Drop for CookieGuard<'a> {
+    fn drop(&mut self) {
+        let _ = self.cookies.lock().unwrap().remove(&self.peer);
+    }
 }
 
 impl Puncher {
@@ -75,7 +94,7 @@ impl Puncher {
     /// `session` must be shared with the switch so probes and data are mutually
     /// authenticated.
     pub fn new(
-        local_node: lanlink_proto::NodeId,
+        local_node: lanlink_types::NodeId,
         socket: Arc<UdpSocket>,
         session: lanlink_crypto::StaticSession,
         stun_servers: Vec<SocketAddr>,
@@ -85,6 +104,7 @@ impl Puncher {
             socket,
             session,
             stun_servers,
+            expected_cookies: Mutex::new(HashMap::new()),
         }
     }
 
@@ -95,10 +115,10 @@ impl Puncher {
     /// STUN server. If STUN fails, host candidates are still returned so LAN and
     /// port-forwarded scenarios continue to work.
     pub async fn gather_candidates(&self) -> Vec<Candidate> {
-        let mut candidates = gather_host_candidates_for_socket(&self.socket).await;
+        let mut candidates = candidate::gather_host_candidates_for_socket(&self.socket);
 
         for stun_server in &self.stun_servers {
-            match stun_binding(&self.socket, *stun_server).await {
+            match stun_binding(&self.socket, *stun_server, None).await {
                 Ok(reflexive) => {
                     tracing::info!(%stun_server, %reflexive, "STUN binding succeeded");
                     candidates.push(Candidate {
@@ -123,10 +143,10 @@ impl Puncher {
     /// confirmed, or `PunchError::NoPair` after `PUNCH_TIMEOUT`.
     pub async fn punch_peer(
         &self,
-        peer: lanlink_proto::NodeId,
+        peer: lanlink_types::NodeId,
         remote_candidates: Vec<Candidate>,
     ) -> Result<VerifiedPath> {
-        let local_candidates = gather_host_candidates_for_socket(&self.socket).await;
+        let local_candidates = candidate::gather_host_candidates_for_socket(&self.socket);
 
         // If the peer is on the same host, host candidates usually win.
         let pairs = build_candidate_pairs(&local_candidates, &remote_candidates);
@@ -134,11 +154,21 @@ impl Puncher {
             return Err(PunchError::NoPair);
         }
 
+        // Use a single cookie for the whole attempt so that a stale reply from
+        // an earlier burst cannot be mistaken for the current one. Store it
+        // per-peer so concurrent punches do not clobber each other's cookies.
+        let cookie = rand::random::<u64>();
+        self.expected_cookies.lock().unwrap().insert(peer, cookie);
+        let _guard = CookieGuard {
+            cookies: &self.expected_cookies,
+            peer,
+        };
+
         let mut ticker = interval(PROBE_INTERVAL);
         let deadline = Instant::now() + PUNCH_TIMEOUT;
 
         // Burst probes at the start, then periodically.
-        self.fire_probe_burst(peer, &pairs, PROBES_PER_BURST)
+        self.fire_probe_burst(peer, &pairs, PROBES_PER_BURST, cookie)
             .await?;
 
         loop {
@@ -149,7 +179,7 @@ impl Puncher {
 
             tokio::select! {
                 _ = ticker.tick() => {
-                    self.fire_probe_burst(peer, &pairs, PROBES_PER_BURST).await?;
+                    self.fire_probe_burst(peer, &pairs, PROBES_PER_BURST, cookie).await?;
                 }
                 _ = tokio::time::sleep(remaining) => {
                     break;
@@ -168,25 +198,25 @@ impl Puncher {
     /// packet is handed to the switch.
     pub async fn on_punch_probe(&self, from: SocketAddr, packet: &[u8]) -> Result<bool> {
         let (receiver, ptype, inner) = self.session.open(packet)?;
-        if receiver != self.local_node || ptype != lanlink_proto::PUNCH_PROBE_PACKET_TYPE {
+        if receiver != self.local_node || ptype != lanlink_types::PUNCH_PROBE_PACKET_TYPE {
             return Ok(false);
         }
-        if inner.len() < lanlink_proto::NODE_ID_LEN + 8 {
+        if inner.len() < lanlink_types::NODE_ID_LEN + 8 {
             return Ok(false);
         }
 
-        let mut sender_bytes = [0u8; lanlink_proto::NODE_ID_LEN];
-        sender_bytes.copy_from_slice(&inner[..lanlink_proto::NODE_ID_LEN]);
-        let peer = lanlink_proto::NodeId(sender_bytes);
+        let mut sender_bytes = [0u8; lanlink_types::NODE_ID_LEN];
+        sender_bytes.copy_from_slice(&inner[..lanlink_types::NODE_ID_LEN]);
+        let peer = lanlink_types::NodeId(sender_bytes);
 
         let mut cookie_bytes = [0u8; 8];
         cookie_bytes
-            .copy_from_slice(&inner[lanlink_proto::NODE_ID_LEN..lanlink_proto::NODE_ID_LEN + 8]);
+            .copy_from_slice(&inner[lanlink_types::NODE_ID_LEN..lanlink_types::NODE_ID_LEN + 8]);
 
         let reply_inner = self.build_punch_reply_inner(peer, cookie_bytes);
         let reply =
             self.session
-                .seal(peer, lanlink_proto::PUNCH_REPLY_PACKET_TYPE, &reply_inner)?;
+                .seal(peer, lanlink_types::PUNCH_REPLY_PACKET_TYPE, &reply_inner)?;
         self.socket.send_to(&reply, from).await?;
         Ok(true)
     }
@@ -199,16 +229,33 @@ impl Puncher {
     /// packet is handed to the switch.
     pub fn on_punch_reply(&self, from: SocketAddr, packet: &[u8]) -> Result<Option<VerifiedPath>> {
         let (receiver, ptype, inner) = self.session.open(packet)?;
-        if receiver != self.local_node || ptype != lanlink_proto::PUNCH_REPLY_PACKET_TYPE {
+        if receiver != self.local_node || ptype != lanlink_types::PUNCH_REPLY_PACKET_TYPE {
             return Ok(None);
         }
-        if inner.len() < lanlink_proto::NODE_ID_LEN + 8 {
+        if inner.len() < lanlink_types::NODE_ID_LEN + 8 {
             return Ok(None);
         }
 
-        let mut sender_bytes = [0u8; lanlink_proto::NODE_ID_LEN];
-        sender_bytes.copy_from_slice(&inner[..lanlink_proto::NODE_ID_LEN]);
-        let peer = lanlink_proto::NodeId(sender_bytes);
+        let mut sender_bytes = [0u8; lanlink_types::NODE_ID_LEN];
+        sender_bytes.copy_from_slice(&inner[..lanlink_types::NODE_ID_LEN]);
+        let peer = lanlink_types::NodeId(sender_bytes);
+
+        let mut cookie_bytes = [0u8; 8];
+        cookie_bytes
+            .copy_from_slice(&inner[lanlink_types::NODE_ID_LEN..lanlink_types::NODE_ID_LEN + 8]);
+        let cookie = u64::from_be_bytes(cookie_bytes);
+
+        // Accept the reply only if we are currently punching this peer and the
+        // echoed cookie matches the one we sent. This prevents stale or
+        // reflected PUNCH_REPLY packets from being accepted as valid paths.
+        let expected = {
+            let cookies = self.expected_cookies.lock().unwrap();
+            cookies.get(&peer).copied()
+        };
+        if expected != Some(cookie) {
+            return Ok(None);
+        }
+        self.expected_cookies.lock().unwrap().remove(&peer);
 
         // The address the reply actually came from is the working path, not
         // necessarily the candidate we sent the probe to.
@@ -218,24 +265,24 @@ impl Puncher {
     /// Build and send one authenticated PUNCH_PROBE to a candidate address.
     async fn send_probe(
         &self,
-        peer: lanlink_proto::NodeId,
+        peer: lanlink_types::NodeId,
         target: SocketAddr,
         cookie: u64,
     ) -> Result<()> {
-        let mut inner = Vec::with_capacity(lanlink_proto::NODE_ID_LEN + 8);
+        let mut inner = Vec::with_capacity(lanlink_types::NODE_ID_LEN + 8);
         inner.extend_from_slice(&self.local_node.0);
         inner.extend_from_slice(&cookie.to_be_bytes());
 
         let packet = self
             .session
-            .seal(peer, lanlink_proto::PUNCH_PROBE_PACKET_TYPE, &inner)?;
+            .seal(peer, lanlink_types::PUNCH_PROBE_PACKET_TYPE, &inner)?;
         self.socket.send_to(&packet, target).await?;
         Ok(())
     }
 
     /// Build the inner plaintext for a PUNCH_REPLY.
-    fn build_punch_reply_inner(&self, _to: lanlink_proto::NodeId, cookie: [u8; 8]) -> Vec<u8> {
-        let mut inner = Vec::with_capacity(lanlink_proto::NODE_ID_LEN + 8);
+    fn build_punch_reply_inner(&self, _to: lanlink_types::NodeId, cookie: [u8; 8]) -> Vec<u8> {
+        let mut inner = Vec::with_capacity(lanlink_types::NODE_ID_LEN + 8);
         inner.extend_from_slice(&self.local_node.0);
         inner.extend_from_slice(&cookie);
         inner
@@ -244,11 +291,11 @@ impl Puncher {
     /// Fire a small number of probes at distinct candidate pairs.
     async fn fire_probe_burst(
         &self,
-        peer: lanlink_proto::NodeId,
+        peer: lanlink_types::NodeId,
         pairs: &[(SocketAddr, SocketAddr)],
         count: usize,
+        cookie: u64,
     ) -> Result<()> {
-        let cookie = rand::random::<u64>();
         for pair in pairs.iter().take(count) {
             let target = pair.1;
             if let Err(e) = self.send_probe(peer, target, cookie).await {
@@ -260,8 +307,20 @@ impl Puncher {
 }
 
 /// Query a STUN server for the public address mapped to our local socket.
-async fn stun_binding(socket: &UdpSocket, stun_server: SocketAddr) -> Result<SocketAddr> {
+///
+/// `integrity_password` is used to verify `MESSAGE-INTEGRITY` when the STUN
+/// server includes it in the response. Public STUN servers do not use it, but
+/// verifying it when present prevents off-path attackers from injecting
+/// forged reflexive addresses.
+async fn stun_binding(
+    socket: &UdpSocket,
+    stun_server: SocketAddr,
+    integrity_password: Option<&str>,
+) -> Result<SocketAddr> {
     use stun::agent::TransactionId;
+    use stun::attributes::{ATTR_FINGERPRINT, ATTR_MESSAGE_INTEGRITY};
+    use stun::fingerprint::FINGERPRINT;
+    use stun::integrity::MessageIntegrity;
     use stun::message::{Getter, Message, BINDING_REQUEST, BINDING_SUCCESS};
     use stun::xoraddr::XorMappedAddress;
 
@@ -269,6 +328,7 @@ async fn stun_binding(socket: &UdpSocket, stun_server: SocketAddr) -> Result<Soc
     msg.build(&[Box::<TransactionId>::default(), Box::new(BINDING_REQUEST)])
         .map_err(|e| PunchError::Stun(e.to_string()))?;
 
+    let transaction_id = msg.transaction_id;
     let request = msg.raw;
 
     socket.send_to(&request, stun_server).await?;
@@ -287,13 +347,39 @@ async fn stun_binding(socket: &UdpSocket, stun_server: SocketAddr) -> Result<Soc
     }
 
     let mut resp = Message::new();
+    resp.raw.clear();
     resp.raw.extend_from_slice(&buf[..n]);
     resp.decode().map_err(|e| PunchError::Stun(e.to_string()))?;
+
+    if resp.transaction_id != transaction_id {
+        return Err(PunchError::Stun("STUN transaction id mismatch".to_string()));
+    }
 
     if resp.typ != BINDING_SUCCESS {
         return Err(PunchError::Stun(
             "not a binding success response".to_string(),
         ));
+    }
+
+    if resp.contains(ATTR_FINGERPRINT) {
+        FINGERPRINT
+            .check(&resp)
+            .map_err(|e| PunchError::Stun(format!("STUN fingerprint check failed: {e}")))?;
+    }
+
+    if resp.contains(ATTR_MESSAGE_INTEGRITY) {
+        match integrity_password {
+            Some(password) => {
+                MessageIntegrity::new_short_term_integrity(password.to_string())
+                    .check(&mut resp)
+                    .map_err(|e| PunchError::Stun(format!("STUN integrity check failed: {e}")))?;
+            }
+            None => {
+                return Err(PunchError::Stun(
+                    "STUN MESSAGE-INTEGRITY present but no credentials configured".to_string(),
+                ));
+            }
+        }
     }
 
     let mut xor_addr = XorMappedAddress::default();
@@ -302,58 +388,6 @@ async fn stun_binding(socket: &UdpSocket, stun_server: SocketAddr) -> Result<Soc
         .map_err(|e| PunchError::Stun(e.to_string()))?;
 
     Ok(SocketAddr::new(xor_addr.ip, xor_addr.port))
-}
-
-/// Gather host candidates: every local interface IP combined with the socket's
-/// local port, plus the loopback address for same-machine testing.
-async fn gather_host_candidates_for_socket(socket: &UdpSocket) -> Vec<Candidate> {
-    let local_addr = match socket.local_addr() {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to get local socket address");
-            return Vec::new();
-        }
-    };
-
-    let port = local_addr.port();
-    let mut candidates = Vec::new();
-
-    // Always advertise the bound address itself when it is specific.
-    if !is_unspecified(local_addr) {
-        candidates.push(Candidate {
-            addr: local_addr,
-            kind: CandidateKind::Host,
-        });
-    }
-
-    // Enumerate local interfaces.
-    match if_addrs::get_if_addrs() {
-        Ok(interfaces) => {
-            for iface in interfaces {
-                let ip = match iface.addr.ip() {
-                    std::net::IpAddr::V4(ip) => ip,
-                    _ => continue,
-                };
-                let addr = SocketAddr::new(std::net::IpAddr::V4(ip), port);
-                candidates.push(Candidate {
-                    addr,
-                    kind: CandidateKind::Host,
-                });
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to enumerate network interfaces");
-        }
-    }
-
-    candidates
-}
-
-fn is_unspecified(addr: SocketAddr) -> bool {
-    match addr.ip() {
-        std::net::IpAddr::V4(ip) => ip.is_unspecified(),
-        std::net::IpAddr::V6(ip) => ip.is_unspecified(),
-    }
 }
 
 /// Build candidate pairs from local and remote candidate lists. The result is a
@@ -388,8 +422,17 @@ fn pair_score(local: CandidateKind, remote: CandidateKind) -> u8 {
     }
 }
 
+fn is_unspecified(addr: SocketAddr) -> bool {
+    match addr.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_unspecified(),
+        std::net::IpAddr::V6(ip) => ip.is_unspecified(),
+    }
+}
+
 mod candidate {
+    use super::is_unspecified;
     use std::net::SocketAddr;
+    use tokio::net::UdpSocket;
 
     /// A single local or reflexive transport candidate.
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -405,13 +448,53 @@ mod candidate {
         Relay,
     }
 
-    /// Gather host candidates for a fixed local port.
+    /// Source of the local port when gathering host candidates.
+    enum HostCandidateSource<'a> {
+        /// A fixed port for callers that do not yet have a bound socket.
+        Port(u16),
+        /// A bound UDP socket; its local address is also advertised if specific.
+        Socket(&'a UdpSocket),
+    }
+
+    impl HostCandidateSource<'_> {
+        fn resolve(&self) -> Option<(u16, Option<SocketAddr>)> {
+            match self {
+                HostCandidateSource::Port(port) => Some((*port, None)),
+                HostCandidateSource::Socket(socket) => match socket.local_addr() {
+                    Ok(addr) => Some((addr.port(), Some(addr))),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to get local socket address");
+                        None
+                    }
+                },
+            }
+        }
+    }
+
+    /// Gather host candidates from `source`.
     ///
-    /// This is the synchronous variant used by callers that do not yet have a
-    /// bound socket. It enumerates local network interfaces and pairs each IPv4
-    /// address with `port`.
-    pub fn gather_host_candidates(port: u16) -> Vec<Candidate> {
+    /// For a bound socket the local address is advertised first (when it is
+    /// specific), followed by every local interface IPv4 address paired with the
+    /// port.  For a bare port only the interface addresses are used.  If no
+    /// addresses are found, a loopback candidate is added as a fallback for
+    /// same-machine testing.
+    fn collect_host_candidates(source: HostCandidateSource<'_>) -> Vec<Candidate> {
         let mut candidates = Vec::new();
+
+        let (port, bound) = match source.resolve() {
+            Some(v) => v,
+            None => return candidates,
+        };
+
+        if let Some(addr) = bound {
+            if !is_unspecified(addr) {
+                candidates.push(Candidate {
+                    addr,
+                    kind: CandidateKind::Host,
+                });
+            }
+        }
+
         match if_addrs::get_if_addrs() {
             Ok(interfaces) => {
                 for iface in interfaces {
@@ -440,16 +523,30 @@ mod candidate {
 
         candidates
     }
+
+    /// Gather host candidates for a fixed local port.
+    ///
+    /// This is the synchronous variant used by callers that do not yet have a
+    /// bound socket. It enumerates local network interfaces and pairs each IPv4
+    /// address with `port`.
+    pub fn gather_host_candidates(port: u16) -> Vec<Candidate> {
+        collect_host_candidates(HostCandidateSource::Port(port))
+    }
+
+    /// Gather host candidates for a bound UDP socket.
+    pub(super) fn gather_host_candidates_for_socket(socket: &UdpSocket) -> Vec<Candidate> {
+        collect_host_candidates(HostCandidateSource::Socket(socket))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn node(id: u8) -> lanlink_proto::NodeId {
+    fn node(id: u8) -> lanlink_types::NodeId {
         let mut b = [0u8; 8];
         b[7] = id;
-        lanlink_proto::NodeId(b)
+        lanlink_types::NodeId(b)
     }
 
     fn make_session() -> lanlink_crypto::StaticSession {
@@ -534,22 +631,28 @@ mod tests {
         let session_a = make_session();
         let session_b = make_session();
 
-        let puncher_a = Puncher::new(local_a, socket_a.clone(), session_a.clone(), vec![]);
-        let puncher_b = Puncher::new(local_b, socket_b.clone(), session_b.clone(), vec![]);
+        let puncher_a = Arc::new(Puncher::new(
+            local_a,
+            socket_a.clone(),
+            session_a.clone(),
+            vec![],
+        ));
+        let puncher_b = Arc::new(Puncher::new(
+            local_b,
+            socket_b.clone(),
+            session_b.clone(),
+            vec![],
+        ));
 
-        // A manually sends an authenticated PUNCH_PROBE to B.
-        let cookie = 0xdeadbeef_u64;
-        let mut probe_inner = Vec::with_capacity(lanlink_proto::NODE_ID_LEN + 8);
-        probe_inner.extend_from_slice(&local_a.0);
-        probe_inner.extend_from_slice(&cookie.to_be_bytes());
-        let probe = session_a
-            .seal(
-                local_b,
-                lanlink_proto::PUNCH_PROBE_PACKET_TYPE,
-                &probe_inner,
-            )
-            .unwrap();
-        socket_a.send_to(&probe, addr_b).await.unwrap();
+        // Start A's punch attempt so the expected cookie is registered.
+        let punch_task = tokio::spawn({
+            let puncher_a = puncher_a.clone();
+            let remote = vec![Candidate {
+                addr: addr_b,
+                kind: CandidateKind::Host,
+            }];
+            async move { puncher_a.punch_peer(local_b, remote).await }
+        });
 
         // B receives the probe and replies.
         let mut buf = [0u8; 512];
@@ -568,5 +671,193 @@ mod tests {
             .expect("reply accepted");
         assert_eq!(path.peer, local_b);
         assert_eq!(path.addr, addr_b);
+
+        punch_task.abort();
+    }
+
+    #[tokio::test]
+    async fn stale_punch_reply_is_ignored() {
+        let local_a = node(1);
+        let local_b = node(2);
+
+        let socket_a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket_b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addr_a = socket_a.local_addr().unwrap();
+        let addr_b = socket_b.local_addr().unwrap();
+
+        let session_a = make_session();
+        let session_b = make_session();
+
+        let puncher_a = Arc::new(Puncher::new(
+            local_a,
+            socket_a.clone(),
+            session_a.clone(),
+            vec![],
+        ));
+        let puncher_b = Arc::new(Puncher::new(
+            local_b,
+            socket_b.clone(),
+            session_b.clone(),
+            vec![],
+        ));
+
+        // B sends a PUNCH_REPLY, but A never started a punch attempt, so
+        // there is no expected cookie and the reply must be ignored.
+        let stale_cookie = 0xbadc0ffee_u64;
+        let reply_inner = puncher_b.build_punch_reply_inner(local_a, stale_cookie.to_be_bytes());
+        let reply = session_b
+            .seal(
+                local_a,
+                lanlink_types::PUNCH_REPLY_PACKET_TYPE,
+                &reply_inner,
+            )
+            .unwrap();
+        socket_b.send_to(&reply, addr_a).await.unwrap();
+
+        let mut buf = [0u8; 512];
+        let (n, from) = socket_a.recv_from(&mut buf).await.unwrap();
+        assert_eq!(from, addr_b);
+        assert!(puncher_a.on_punch_reply(from, &buf[..n]).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn wrong_cookie_punch_reply_is_ignored() {
+        let local_a = node(1);
+        let local_b = node(2);
+
+        let socket_a = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let socket_b = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let addr_a = socket_a.local_addr().unwrap();
+        let addr_b = socket_b.local_addr().unwrap();
+
+        let session_a = make_session();
+        let session_b = make_session();
+
+        let puncher_a = Arc::new(Puncher::new(
+            local_a,
+            socket_a.clone(),
+            session_a.clone(),
+            vec![],
+        ));
+        let puncher_b = Arc::new(Puncher::new(
+            local_b,
+            socket_b.clone(),
+            session_b.clone(),
+            vec![],
+        ));
+
+        // Start A's punch attempt so a cookie is registered for B.
+        let punch_task = tokio::spawn({
+            let puncher_a = puncher_a.clone();
+            let remote = vec![Candidate {
+                addr: addr_b,
+                kind: CandidateKind::Host,
+            }];
+            async move { puncher_a.punch_peer(local_b, remote).await }
+        });
+
+        // Instead of replying to the probe, B sends a reply with a wrong
+        // cookie. A must ignore it because it does not match the expected one.
+        let wrong_cookie = 0xdeadbeef_u64;
+        let reply_inner = puncher_b.build_punch_reply_inner(local_a, wrong_cookie.to_be_bytes());
+        let reply = session_b
+            .seal(
+                local_a,
+                lanlink_types::PUNCH_REPLY_PACKET_TYPE,
+                &reply_inner,
+            )
+            .unwrap();
+        socket_b.send_to(&reply, addr_a).await.unwrap();
+
+        let mut buf = [0u8; 512];
+        let (n, from) = socket_a.recv_from(&mut buf).await.unwrap();
+        assert_eq!(from, addr_b);
+        assert!(puncher_a.on_punch_reply(from, &buf[..n]).unwrap().is_none());
+
+        punch_task.abort();
+    }
+
+    #[tokio::test]
+    async fn stun_binding_rejects_wrong_transaction_id() {
+        use stun::message::{Message, Setter, BINDING_SUCCESS};
+        use stun::xoraddr::XorMappedAddress;
+
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (n, from) = server.recv_from(&mut buf).await.unwrap();
+
+            // Decode request so we can mirror its transaction id for the
+            // XorMappedAddress XOR mask. Then deliberately flip one byte of
+            // the id in the response to simulate an off-path spoofed packet.
+            let mut req = Message::new();
+            req.raw.clear();
+            req.raw.extend_from_slice(&buf[..n]);
+            req.decode().unwrap();
+
+            let mut bad_id = req.transaction_id;
+            bad_id.0[0] ^= 0xff;
+
+            let mut resp = Message::new();
+            resp.build(&[Box::new(BINDING_SUCCESS), Box::new(bad_id)])
+                .unwrap();
+
+            let xor_addr = XorMappedAddress {
+                ip: "203.0.113.1".parse().unwrap(),
+                port: 12345,
+            };
+            xor_addr.add_to(&mut resp).unwrap();
+
+            server.send_to(&resp.raw, from).await.unwrap();
+        });
+
+        let result = stun_binding(&client, server_addr, None).await;
+        assert!(
+            matches!(result, Err(PunchError::Stun(ref s)) if s.contains("transaction id mismatch")),
+            "expected transaction id mismatch error, got {result:?}"
+        );
+
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stun_binding_accepts_valid_response() {
+        use stun::message::{Message, Setter, BINDING_SUCCESS};
+        use stun::xoraddr::XorMappedAddress;
+
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+
+        let server_task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (n, from) = server.recv_from(&mut buf).await.unwrap();
+
+            let mut req = Message::new();
+            req.raw.clear();
+            req.raw.extend_from_slice(&buf[..n]);
+            req.decode().unwrap();
+
+            let mut resp = Message::new();
+            resp.build(&[Box::new(BINDING_SUCCESS), Box::new(req.transaction_id)])
+                .unwrap();
+
+            let expected_addr: SocketAddr = "203.0.113.1:12345".parse().unwrap();
+            let xor_addr = XorMappedAddress {
+                ip: expected_addr.ip(),
+                port: expected_addr.port(),
+            };
+            xor_addr.add_to(&mut resp).unwrap();
+
+            server.send_to(&resp.raw, from).await.unwrap();
+            expected_addr
+        });
+
+        let result = stun_binding(&client, server_addr, None).await.unwrap();
+        let expected_addr = server_task.await.unwrap();
+        assert_eq!(result, expected_addr);
     }
 }

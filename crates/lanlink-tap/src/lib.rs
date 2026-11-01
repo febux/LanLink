@@ -40,7 +40,7 @@ impl Default for NicConfig {
     fn default() -> Self {
         Self {
             name: "lanlink0".to_string(),
-            mtu: 1400,
+            mtu: lanlink_types::RECOMMENDED_MTU,
             ipv4: std::net::Ipv4Addr::new(26, 0, 0, 1),
             netmask: std::net::Ipv4Addr::new(255, 0, 0, 0),
         }
@@ -61,10 +61,12 @@ pub trait VirtualNic: Send {
 }
 
 /// Factory: create the best backend for the current platform.
-pub fn create_nic(config: NicConfig) -> Result<Box<dyn VirtualNic>, NicError> {
+pub async fn create_nic(config: NicConfig) -> Result<Box<dyn VirtualNic>, NicError> {
     #[cfg(target_os = "linux")]
     {
-        LinuxTun::create(config).map(|d| Box::new(d) as Box<dyn VirtualNic>)
+        LinuxTun::create(config)
+            .await
+            .map(|d| Box::new(d) as Box<dyn VirtualNic>)
     }
     #[cfg(target_os = "windows")]
     {
@@ -107,7 +109,7 @@ pub struct LinuxTun {
 
 #[cfg(target_os = "linux")]
 impl LinuxTun {
-    pub fn create(config: NicConfig) -> Result<Self, NicError> {
+    pub async fn create(config: NicConfig) -> Result<Self, NicError> {
         // LanLink switches raw Ethernet frames, so the device must be a TAP
         // (layer 2), not a TUN (layer 3). Older versions of this backend left
         // the layer at the crate default, which is TUN on Linux.
@@ -127,13 +129,15 @@ impl LinuxTun {
         // checks; netlink is classless and matches how the gateway code already
         // configures routes.
         let prefix = netmask_to_prefix(config.netmask);
-        run_ip(&[
-            "addr",
-            "add",
-            &format!("{}/{}", config.ipv4, prefix),
-            "dev",
-            &config.name,
+        let name = config.name.clone();
+        run_ip_owned(vec![
+            "addr".into(),
+            "add".into(),
+            format!("{}/{}", config.ipv4, prefix),
+            "dev".into(),
+            name.clone(),
         ])
+        .await
         .map_err(|e| {
             NicError::Create(io::Error::other(format!(
                 "add address on '{}': {e}",
@@ -141,15 +145,16 @@ impl LinuxTun {
             )))
         })?;
 
-        run_ip(&[
-            "link",
-            "set",
-            "dev",
-            &config.name,
-            "mtu",
-            &config.mtu.to_string(),
-            "up",
+        run_ip_owned(vec![
+            "link".into(),
+            "set".into(),
+            "dev".into(),
+            name.clone(),
+            "mtu".into(),
+            config.mtu.to_string(),
+            "up".into(),
         ])
+        .await
         .map_err(|e| {
             NicError::Create(io::Error::other(format!("bring up '{}': {e}", config.name)))
         })?;
@@ -170,6 +175,29 @@ impl LinuxTun {
 
 fn netmask_to_prefix(mask: std::net::Ipv4Addr) -> u8 {
     mask.octets().iter().map(|b| b.count_ones() as u8).sum()
+}
+
+#[cfg(target_os = "linux")]
+async fn run_ip_owned(args: Vec<String>) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("ip")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("failed to run 'ip {}': {e}", args.join(" ")))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "'ip {}' failed ({}): {}",
+                args.join(" "),
+                output.status,
+                stderr.trim()
+            ))
+        }
+    })
+    .await
+    .map_err(|e| format!("ip command task panicked: {e}"))?
 }
 
 fn run_ip(args: &[&str]) -> Result<(), String> {

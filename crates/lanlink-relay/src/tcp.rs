@@ -42,7 +42,7 @@ pub struct TcpRelayServer {
 }
 
 struct RelayState {
-    bindings: HashMap<lanlink_proto::NodeId, tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    bindings: HashMap<lanlink_types::NodeId, tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 impl TcpRelayServer {
@@ -83,7 +83,7 @@ impl TcpRelayServer {
     }
 
     /// Return a snapshot of currently-bound node ids (useful for diagnostics).
-    pub async fn bindings(&self) -> Vec<lanlink_proto::NodeId> {
+    pub async fn bindings(&self) -> Vec<lanlink_types::NodeId> {
         self.state.lock().await.bindings.keys().copied().collect()
     }
 }
@@ -135,19 +135,31 @@ async fn handle_client(
             continue;
         }
 
-        if frame.len() < 4 + lanlink_proto::NODE_ID_LEN {
+        if frame.len() < 4 + lanlink_types::NODE_ID_LEN {
             tracing::debug!(%from, len = frame.len(), "TCP relay frame too short");
             continue;
         }
 
-        let mut receiver = [0u8; lanlink_proto::NODE_ID_LEN];
-        receiver.copy_from_slice(&frame[4..4 + lanlink_proto::NODE_ID_LEN]);
-        let receiver = lanlink_proto::NodeId(receiver);
+        let mut receiver = [0u8; lanlink_types::NODE_ID_LEN];
+        receiver.copy_from_slice(&frame[4..4 + lanlink_types::NODE_ID_LEN]);
+        let receiver = lanlink_types::NodeId(receiver);
 
-        let s = state.lock().await;
-        if let Some(sender) = s.bindings.get(&receiver) {
+        let sender = {
+            let s = state.lock().await;
+            s.bindings.get(&receiver).cloned()
+        };
+        if let Some(sender) = sender {
             let bytes = frame.len();
-            let _ = sender.send(frame);
+            if let Err(e) = sender.send(frame) {
+                tracing::warn!(
+                    ?receiver,
+                    %from,
+                    %bytes,
+                    error = %e,
+                    "TCP relay forward channel closed, disconnecting"
+                );
+                break;
+            }
             tracing::trace!(?receiver, %from, bytes, "TCP relay forwarded packet");
         } else {
             tracing::debug!(?receiver, %from, "TCP relay no binding for receiver");
@@ -203,7 +215,7 @@ pub mod client {
     /// for outgoing length-prefixed packets plus a stream of incoming packets.
     pub async fn connect(
         addr: SocketAddr,
-        node_id: lanlink_proto::NodeId,
+        node_id: lanlink_types::NodeId,
     ) -> anyhow::Result<(
         tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
         tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
@@ -255,18 +267,18 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn node(id: u8) -> lanlink_proto::NodeId {
+    fn node(id: u8) -> lanlink_types::NodeId {
         let mut b = [0u8; 8];
         b[7] = id;
-        lanlink_proto::NodeId(b)
+        lanlink_types::NodeId(b)
     }
 
-    fn fake_lanlink_packet(receiver: lanlink_proto::NodeId) -> Vec<u8> {
-        let mut data = vec![0u8; 4 + lanlink_proto::NODE_ID_LEN + 4];
-        data[0] = lanlink_proto::WIRE_PROTOCOL_VERSION;
-        data[1] = lanlink_proto::DATA_PACKET_TYPE;
-        data[4..4 + lanlink_proto::NODE_ID_LEN].copy_from_slice(&receiver.0);
-        data[4 + lanlink_proto::NODE_ID_LEN..].copy_from_slice(b"ping");
+    fn fake_lanlink_packet(receiver: lanlink_types::NodeId) -> Vec<u8> {
+        let mut data = vec![0u8; 4 + lanlink_types::NODE_ID_LEN + 4];
+        data[0] = lanlink_types::WIRE_PROTOCOL_VERSION;
+        data[1] = lanlink_types::DATA_PACKET_TYPE;
+        data[4..4 + lanlink_types::NODE_ID_LEN].copy_from_slice(&receiver.0);
+        data[4 + lanlink_types::NODE_ID_LEN..].copy_from_slice(b"ping");
         data
     }
 
@@ -296,5 +308,40 @@ mod tests {
             .expect("timeout")
             .expect("received packet");
         assert_eq!(received, packet);
+    }
+
+    #[tokio::test]
+    async fn forward_channel_failure_disconnects_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Insert a binding whose receiver has been dropped so sending fails.
+        let (dropped_tx, _dropped_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        drop(_dropped_rx);
+        let state = Arc::new(Mutex::new(RelayState {
+            bindings: [(node(2), dropped_tx)].into_iter().collect(),
+        }));
+
+        let client = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let (mut read_half, mut write_half) = stream.into_split();
+            write_frame(&mut write_half, &crate::encode_bind(node(1)))
+                .await
+                .unwrap();
+            write_frame(&mut write_half, &fake_lanlink_packet(node(2)))
+                .await
+                .unwrap();
+            read_frame(&mut read_half).await
+        });
+
+        let (stream, from) = listener.accept().await.unwrap();
+        let result = handle_client(stream, from, state).await;
+        assert!(result.is_ok(), "handle_client returned {result:?}");
+
+        let client_read = client.await.unwrap();
+        assert!(
+            matches!(client_read, Ok(None)),
+            "server should close the connection, got {client_read:?}"
+        );
     }
 }

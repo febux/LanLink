@@ -17,9 +17,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 serde.workspace = true
-serde_json = "1"
-# Windows status-socket discovery reads the daemon config's [status] table.
-toml.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
@@ -28,10 +25,12 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 rand.workspace = true
+lanlink-client = { path = "../lanlink-client" }
 lanlink-proto = { path = "../lanlink-proto" }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 open = "5.4.4"
 
+lanlink-types = { path = "../lanlink-types" }
 [features]
 # Enable Tauri's devtools only in debug builds via the workspace's default dev profile.
 default = []

@@ -2,6 +2,7 @@
 //! network concerns so it can be unit-tested headlessly: `on_event` maps an
 //! [`Event`] (plus optional pending [`Action`]s) to state changes only.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -220,8 +221,8 @@ pub struct App {
     pub quit: bool,
 
     /// Bytes-per-second history for the dashboard sparklines.
-    pub tx_rate: Vec<u64>,
-    pub rx_rate: Vec<u64>,
+    pub tx_rate: VecDeque<u64>,
+    pub rx_rate: VecDeque<u64>,
     last_snapshot_at: Option<Instant>,
     last_tx_bytes: Option<u64>,
     last_rx_bytes: Option<u64>,
@@ -251,8 +252,8 @@ impl App {
             busy: false,
             toast: None,
             quit: false,
-            tx_rate: Vec::new(),
-            rx_rate: Vec::new(),
+            tx_rate: VecDeque::new(),
+            rx_rate: VecDeque::new(),
             last_snapshot_at: None,
             last_tx_bytes: None,
             last_rx_bytes: None,
@@ -328,7 +329,12 @@ impl App {
                 self.peer_sort = self.peer_sort.next();
             }
             KeyCode::Char('d') => {
-                if self.snapshot.as_ref().map(|s| s.status.connected).unwrap_or(false) {
+                if self
+                    .snapshot
+                    .as_ref()
+                    .map(|s| s.status.connected)
+                    .unwrap_or(false)
+                {
                     return vec![Action::DaemonDisconnect];
                 } else {
                     self.show_toast("not connected", Severity::Info);
@@ -573,12 +579,12 @@ impl App {
 }
 
 /// Append to a bounded rate-history ring.
-fn push_rate(history: &mut Vec<u64>, value: u64) {
+fn push_rate(history: &mut VecDeque<u64>, value: u64) {
     const MAX: usize = 60;
-    history.push(value);
-    if history.len() > MAX {
-        history.remove(0);
+    if history.len() == MAX {
+        history.pop_front();
     }
+    history.push_back(value);
 }
 
 #[cfg(test)]
@@ -586,7 +592,8 @@ mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventKind, KeyModifiers};
     use lanlink_proto::status::{DaemonStatus, PathKind, PeerStatus};
-    use lanlink_proto::{NetworkId, NodeId, VirtualIp};
+    use lanlink_types::{NodeId, VirtualIp};
+use lanlink_proto::{NetworkId};
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -825,8 +832,8 @@ mod tests {
         // The two snapshots arrive back to back, so the rate divider hits the
         // 0.05 s anti-jitter clamp: 2000 B / 0.05 s = 40000 B/s.
         app.on_event(Event::Snapshot(Ok(sample_snapshot(3000, 2000))));
-        assert_eq!(app.tx_rate.last(), Some(&40000));
-        assert_eq!(app.rx_rate.last(), Some(&0));
+        assert_eq!(app.tx_rate.back(), Some(&40000));
+        assert_eq!(app.rx_rate.back(), Some(&0));
         assert_eq!(app.snapshot.as_ref().unwrap().status.network_id.0, 1);
     }
 
@@ -925,7 +932,10 @@ mod tests {
         assert_eq!(actions, vec![Action::DaemonStop]);
         assert!(!app.quit);
 
-        app.on_event(Event::Coord(Action::DaemonStop, Ok(crate::coord::CoordOutcome::Ack)));
+        app.on_event(Event::Coord(
+            Action::DaemonStop,
+            Ok(crate::coord::CoordOutcome::Ack),
+        ));
         assert!(app.quit);
     }
 }

@@ -1,5 +1,5 @@
 use integration_tests::{eth_frame, network_psk, node_id, TEST_TIMEOUT};
-use lanlink_switch::{Switch, UdpOutcome};
+use lanlink_switch::{InboundOutcome, Switch};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
@@ -41,8 +41,8 @@ async fn switch_exchanges_ethernet_frame_over_loopback_udp() {
         .expect("recv_from b");
     assert_eq!(from, addr_a);
 
-    let decoded = match b.on_packet(addr_a, &buf[..n]).expect("b decodes") {
-        UdpOutcome::Frame(f) => f,
+    let decoded = match b.on_inbound_packet(addr_a, &buf[..n]).expect("b decodes") {
+        InboundOutcome::Frame(f) => f,
         other => panic!("expected Frame, got {other:?}"),
     };
     assert_eq!(decoded, frame);
@@ -103,9 +103,12 @@ async fn switch_reassembles_fragmented_frame_over_loopback_udp() {
             .expect("b receives chunk")
             .expect("recv_from b");
         assert_eq!(from, addr_a);
-        match b.on_packet(addr_a, &buf[..n]).expect("b handles chunk") {
-            UdpOutcome::Frame(f) => assembled = Some(f),
-            UdpOutcome::Ignored => {}
+        match b
+            .on_inbound_packet(addr_a, &buf[..n])
+            .expect("b handles chunk")
+        {
+            InboundOutcome::Frame(f) => assembled = Some(f),
+            InboundOutcome::Ignored => {}
             other => panic!("unexpected outcome: {other:?}"),
         }
     }

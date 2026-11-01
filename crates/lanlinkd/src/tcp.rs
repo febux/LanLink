@@ -45,7 +45,13 @@ impl TcpTransport {
         let local_addr = listener.local_addr()?;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-        tracker.spawn(run_transport(listener, incoming, rx, tracker.clone(), cancel));
+        tracker.spawn(run_transport(
+            listener,
+            incoming,
+            rx,
+            tracker.clone(),
+            cancel,
+        ));
         Ok((Self { tx }, local_addr))
     }
 
@@ -204,14 +210,67 @@ async fn write_frame(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     payload: &[u8],
 ) -> std::io::Result<()> {
-    if payload.len() > u16::MAX as usize {
+    if payload.len() > MAX_FRAME_LEN {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "payload exceeds u16 length",
+            "payload exceeds maximum frame length",
         ));
     }
     let len = (payload.len() as u16).to_be_bytes();
     writer.write_all(&len).await?;
     writer.write_all(payload).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn max_frame_round_trip() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+
+        let (client_read, mut client_write) = client.into_split();
+        let (mut server_read, server_write) = server.into_split();
+
+        let payload = vec![0xABu8; MAX_FRAME_LEN];
+        let payload_clone = payload.clone();
+
+        let write_task = tokio::spawn(async move {
+            write_frame(&mut client_write, &payload_clone)
+                .await
+                .unwrap();
+        });
+        let read_task =
+            tokio::spawn(async move { read_frame(&mut server_read).await.unwrap().unwrap() });
+
+        let (write_result, read_result) = tokio::join!(write_task, read_task);
+        write_result.unwrap();
+        let received = read_result.unwrap();
+        assert_eq!(received.len(), MAX_FRAME_LEN);
+        assert!(received.iter().all(|&b| b == 0xAB));
+
+        // Gracefully close the server write side to avoid spurious errors.
+        drop(server_write);
+        drop(client_read);
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_rejected_on_write() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (_server, _) = listener.accept().await.unwrap();
+        let (_, mut client_write) = client.into_split();
+
+        let payload = vec![0xCDu8; MAX_FRAME_LEN + 1];
+        let err = write_frame(&mut client_write, &payload)
+            .await
+            .expect_err("oversized payload should be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
 }

@@ -10,6 +10,8 @@
 //! (Unix domain socket permissions / TCP loopback binding) rather than tokens.
 
 use crate::status::StatusSnapshot;
+use crate::SecretString;
+use lanlink_types::RECOMMENDED_MTU;
 
 /// A control request from a local frontend to the daemon.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -24,7 +26,7 @@ pub enum ControlRequest {
         /// Network id to join.
         network_id: u64,
         /// Network password.
-        password: String,
+        password: SecretString,
         /// UDP bind address.
         #[serde(default = "default_bind")]
         bind: std::net::SocketAddr,
@@ -64,13 +66,16 @@ fn default_tap() -> String {
     "lanlink0".to_string()
 }
 
+/// Default virtual NIC MTU. Chosen so that a full Ethernet frame carrying an
+/// MTU-sized IPv4 packet fits in a single LanLink DATA packet without chunking.
+/// Equal to `lanlink_types::RECOMMENDED_MTU`.
 fn default_mtu() -> usize {
-    1400
+    RECOMMENDED_MTU
 }
 
 /// Response envelope for one [`ControlRequest`] line.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum ControlResponse {
     /// Command succeeded. For `status` the snapshot is here.
     Ok { result: ControlResult },
@@ -130,6 +135,19 @@ mod tests {
     fn stop_parses() {
         let req: ControlRequest = serde_json::from_str("{\"cmd\":\"stop\"}").unwrap();
         assert!(matches!(req, ControlRequest::Stop));
+    }
+
+    #[test]
+    fn default_mtu_fits_in_single_inner_packet() {
+        // The default TAP MTU plus a full Ethernet header plus the switch chunk
+        // header must not exceed the inner AEAD plaintext capacity, so normal
+        // MTU-sized frames do not trigger LanLink-level chunking.
+        assert!(
+            default_mtu() + lanlink_types::ETHERNET_HEADER_LEN + lanlink_types::DATA_CHUNK_HEADER_LEN
+                <= lanlink_types::MAX_INNER_PAYLOAD,
+            "default_mtu {} is too large for a single DATA packet",
+            default_mtu()
+        );
     }
 
     #[test]

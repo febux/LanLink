@@ -5,7 +5,9 @@
 //! first 8 bytes of the Ed25519 public key, so a peer that knows our public
 //! key also knows our node id.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use zeroize::Zeroizing;
 
 pub const ED25519_PUBLIC_KEY_LEN: usize = 32;
 pub const ED25519_SECRET_KEY_LEN: usize = 32;
@@ -42,11 +44,11 @@ impl Identity {
     }
 
     /// The 8-byte node id derived from the public key.
-    pub fn node_id(&self) -> lanlink_proto::NodeId {
+    pub fn node_id(&self) -> lanlink_types::NodeId {
         let pk = self.public_key();
-        let mut id = [0u8; lanlink_proto::NODE_ID_LEN];
-        id.copy_from_slice(&pk[..lanlink_proto::NODE_ID_LEN]);
-        lanlink_proto::NodeId(id)
+        let mut id = [0u8; lanlink_types::NODE_ID_LEN];
+        id.copy_from_slice(&pk[..lanlink_types::NODE_ID_LEN]);
+        lanlink_types::NodeId(id)
     }
 
     /// Convert this Ed25519 keypair to an X25519 static keypair. The scalar
@@ -94,19 +96,26 @@ pub fn default_identity_path() -> PathBuf {
 /// Load an existing identity from `path`, or create and persist a new one if
 /// the file does not exist or is unreadable.
 pub fn load_or_create(path: &Path) -> anyhow::Result<Identity> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            if bytes.len() != ED25519_SECRET_KEY_LEN {
-                anyhow::bail!(
-                    "identity file {} has wrong length (expected {}, got {})",
+    match std::fs::File::open(path) {
+        Ok(mut file) => {
+            let mut secret = Zeroizing::new([0u8; ED25519_SECRET_KEY_LEN]);
+            std::io::Read::read_exact(&mut file, secret.as_mut()).map_err(|e| {
+                anyhow::anyhow!(
+                    "identity file {} has wrong length (expected {}): {e}",
                     path.display(),
-                    ED25519_SECRET_KEY_LEN,
-                    bytes.len()
+                    ED25519_SECRET_KEY_LEN
+                )
+            })?;
+            // Verify the file is exactly 32 bytes and not trailing data.
+            let mut trailing = [0u8; 1];
+            if file.read(&mut trailing)? != 0 {
+                anyhow::bail!(
+                    "identity file {} has wrong length (expected {}, got more)",
+                    path.display(),
+                    ED25519_SECRET_KEY_LEN
                 );
             }
-            let mut secret = [0u8; ED25519_SECRET_KEY_LEN];
-            secret.copy_from_slice(&bytes);
-            Ok(Identity::from_secret_bytes(secret))
+            Ok(Identity::from_secret_bytes(*secret))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let identity = Identity::generate();

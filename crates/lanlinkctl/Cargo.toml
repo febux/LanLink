@@ -11,6 +11,7 @@ name = "lanlinkctl"
 path = "src/main.rs"
 
 [dependencies]
+lanlink-types = { path = "../lanlink-types" }
 tokio.workspace = true
 clap.workspace = true
 tracing.workspace = true

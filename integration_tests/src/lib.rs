@@ -10,15 +10,15 @@ use std::time::Duration;
 /// Default timeout used by async integration tests.
 pub const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Build a deterministic 8-byte [`lanlink_proto::NodeId`] from a small seed.
+/// Build a deterministic 8-byte [`lanlink_types::NodeId`] from a small seed.
 ///
 /// Seed 0 is reserved for the local node in multi-peer tests; use seeds >= 1
 /// for distinct peers. The public key bytes are predictable, so tests that
 /// need Ed25519 identities should use [`node_identity`] instead.
-pub fn node_id(seed: u8) -> lanlink_proto::NodeId {
-    let mut bytes = [0u8; lanlink_proto::NODE_ID_LEN];
-    bytes[lanlink_proto::NODE_ID_LEN - 1] = seed;
-    lanlink_proto::NodeId(bytes)
+pub fn node_id(seed: u8) -> lanlink_types::NodeId {
+    let mut bytes = [0u8; lanlink_types::NODE_ID_LEN];
+    bytes[lanlink_types::NODE_ID_LEN - 1] = seed;
+    lanlink_types::NodeId(bytes)
 }
 
 /// Build a deterministic [`lanlink_crypto::Identity`] for tests.
@@ -35,6 +35,7 @@ pub fn node_identity(seed: u8) -> lanlink_crypto::Identity {
 /// Derive a network PSK from a deterministic test password.
 pub fn network_psk(network_id: u64) -> [u8; 32] {
     lanlink_crypto::derive_network_psk("integration-test-password", network_id)
+        .expect("test PSK derivation should succeed")
 }
 
 /// Parse a local loopback address for tests.

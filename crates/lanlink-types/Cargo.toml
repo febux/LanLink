@@ -1,0 +1,12 @@
+[package]
+name = "lanlink-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+description = "Base protocol primitives and wire-format constants for LanLink."
+
+[dependencies]
+serde.workspace = true

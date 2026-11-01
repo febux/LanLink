@@ -60,7 +60,7 @@ network_id = 1
 password_file = "/etc/lanlink/gaming-night.secret"
 bind = "0.0.0.0:9000"
 tap = "lanlink0"
-mtu = 1400
+mtu = 1222
 
 [telemetry]
 enabled = false

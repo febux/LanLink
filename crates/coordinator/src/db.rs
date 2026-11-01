@@ -28,6 +28,47 @@ pub async fn connect_test() -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
+/// Latest schema version tracked via `PRAGMA user_version`.
+const CURRENT_SCHEMA_VERSION: i64 = 2;
+
+/// Ordered schema migrations: `(target_version, sql)`.
+const MIGRATIONS: &[(i64, &str)] = &[
+    // Version 1: add relay server/candidate columns (M4/M5).
+    (
+        1,
+        "ALTER TABLE networks ADD COLUMN relay_servers TEXT NOT NULL DEFAULT '[]'",
+    ),
+    (
+        1,
+        "ALTER TABLE networks ADD COLUMN tcp_relay_servers TEXT NOT NULL DEFAULT '[]'",
+    ),
+    (
+        1,
+        "ALTER TABLE members ADD COLUMN relay_candidates TEXT NOT NULL DEFAULT '[]'",
+    ),
+    // Version 2: add gateway/firewall/public/tcp columns (M6).
+    (
+        2,
+        "ALTER TABLE networks ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        2,
+        "ALTER TABLE members ADD COLUMN is_gateway INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        2,
+        "ALTER TABLE members ADD COLUMN shared_subnet TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        2,
+        "ALTER TABLE members ADD COLUMN tcp_candidates TEXT NOT NULL DEFAULT '[]'",
+    ),
+    (
+        2,
+        "ALTER TABLE members ADD COLUMN tcp_relay_candidates TEXT NOT NULL DEFAULT '[]'",
+    ),
+];
+
 async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::query(
         r#"
@@ -80,37 +121,78 @@ async fn ensure_schema(pool: &SqlitePool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    // Migration: add relay columns to databases created before M4/M5.
-    let _ = sqlx::query("ALTER TABLE networks ADD COLUMN relay_servers TEXT NOT NULL DEFAULT '[]'")
-        .execute(pool)
-        .await;
-    let _ =
-        sqlx::query("ALTER TABLE networks ADD COLUMN tcp_relay_servers TEXT NOT NULL DEFAULT '[]'")
-            .execute(pool)
-            .await;
-    let _ =
-        sqlx::query("ALTER TABLE members ADD COLUMN relay_candidates TEXT NOT NULL DEFAULT '[]'")
-            .execute(pool)
-            .await;
-    // Migration: add gateway/firewall columns for M6.
-    let _ = sqlx::query("ALTER TABLE networks ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE members ADD COLUMN is_gateway INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE members ADD COLUMN shared_subnet TEXT NOT NULL DEFAULT ''")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE members ADD COLUMN tcp_candidates TEXT NOT NULL DEFAULT '[]'")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query(
-        "ALTER TABLE members ADD COLUMN tcp_relay_candidates TEXT NOT NULL DEFAULT '[]'",
-    )
-    .execute(pool)
-    .await;
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(pool)
+        .await?;
 
+    tracing::debug!(
+        db_schema_version = version,
+        "checking database schema version"
+    );
+
+    if version >= CURRENT_SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    let mut applied_version = version;
+
+    while applied_version < CURRENT_SCHEMA_VERSION {
+        let target_version = applied_version + 1;
+        let pending: Vec<_> = MIGRATIONS
+            .iter()
+            .filter(|(v, _)| *v == target_version)
+            .map(|(_, sql)| *sql)
+            .collect();
+
+        for sql in pending {
+            match sqlx::query(sql).execute(pool).await {
+                Ok(_) => {
+                    tracing::info!(
+                        migration = %sql,
+                        version = target_version,
+                        "applied schema migration"
+                    );
+                }
+                Err(e) => {
+                    if is_duplicate_column_error(&e) {
+                        tracing::debug!(
+                            migration = %sql,
+                            "schema migration already applied"
+                        );
+                    } else {
+                        tracing::error!(
+                            migration = %sql,
+                            error = %e,
+                            "schema migration failed"
+                        );
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+
+        set_schema_version(pool, target_version).await?;
+        tracing::info!(version = target_version, "database schema version updated");
+        applied_version = target_version;
+    }
+
+    Ok(())
+}
+
+fn is_duplicate_column_error(e: &sqlx::Error) -> bool {
+    match e {
+        sqlx::Error::Database(db_err) => db_err
+            .message()
+            .to_lowercase()
+            .contains("duplicate column name"),
+        _ => false,
+    }
+}
+
+async fn set_schema_version(pool: &SqlitePool, version: i64) -> anyhow::Result<()> {
+    sqlx::query(&format!("PRAGMA user_version = {version}"))
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -178,13 +260,16 @@ pub async fn get_network_password_hash(
     Ok(row.map(|r| r.0))
 }
 
-pub async fn get_network_subnet(
-    pool: &SqlitePool,
+pub async fn get_network_subnet<'e, E>(
+    executor: E,
     network_id: i64,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<String>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let row: Option<(String,)> = sqlx::query_as("SELECT subnet FROM networks WHERE id = ?")
         .bind(network_id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await?;
     Ok(row.map(|r| r.0))
 }
@@ -207,42 +292,32 @@ pub async fn upsert_member(
         .unwrap_or_default()
         .as_secs() as i64;
 
-    // If member already exists, just update candidates and last_seen and return its IP.
-    let existing: Option<(String,)> =
-        sqlx::query_as("SELECT virtual_ip FROM members WHERE network_id = ? AND node_id = ?")
-            .bind(network_id)
-            .bind(node_id.as_slice())
-            .fetch_optional(pool)
-            .await?;
+    let mut tx = pool.begin().await?;
 
-    if let Some(ip) = existing {
-        let ip = Ipv4Addr::from_str(&ip.0)?;
-        sqlx::query(
-            "UPDATE members SET direct_candidates = ?, relay_candidates = ?, tcp_candidates = ?, tcp_relay_candidates = ?, is_gateway = ?, shared_subnet = ?, last_seen = ? WHERE network_id = ? AND node_id = ?",
-        )
-        .bind(direct_candidates)
-        .bind(relay_candidates)
-        .bind(tcp_candidates)
-        .bind(tcp_relay_candidates)
-        .bind(if is_gateway { 1 } else { 0 })
-        .bind(shared_subnet)
-        .bind(now)
-        .bind(network_id)
-        .bind(node_id.as_slice())
-        .execute(pool)
-        .await?;
-        return Ok(ip);
-    }
-
-    let subnet = match get_network_subnet(pool, network_id).await? {
+    let subnet = match get_network_subnet(&mut *tx, network_id).await? {
         Some(s) => s,
         None => anyhow::bail!("network not found"),
     };
-    let ip = assign_ip(pool, network_id, &subnet).await?;
+    let ip = assign_ip(&mut *tx, network_id, &subnet).await?;
 
-    sqlx::query(
-        "INSERT INTO members (network_id, node_id, public_key, virtual_ip, direct_candidates, relay_candidates, tcp_candidates, tcp_relay_candidates, is_gateway, shared_subnet, last_seen)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    let virtual_ip: String = sqlx::query_scalar(
+        r#"
+        INSERT INTO members (
+            network_id, node_id, public_key, virtual_ip,
+            direct_candidates, relay_candidates, tcp_candidates, tcp_relay_candidates,
+            is_gateway, shared_subnet, last_seen
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(network_id, node_id) DO UPDATE SET
+            direct_candidates = excluded.direct_candidates,
+            relay_candidates = excluded.relay_candidates,
+            tcp_candidates = excluded.tcp_candidates,
+            tcp_relay_candidates = excluded.tcp_relay_candidates,
+            is_gateway = excluded.is_gateway,
+            shared_subnet = excluded.shared_subnet,
+            last_seen = excluded.last_seen
+        RETURNING virtual_ip
+        "#,
     )
     .bind(network_id)
     .bind(node_id.as_slice())
@@ -255,13 +330,18 @@ pub async fn upsert_member(
     .bind(if is_gateway { 1 } else { 0 })
     .bind(shared_subnet)
     .bind(now)
-    .execute(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
-    Ok(ip)
+    tx.commit().await?;
+
+    Ok(Ipv4Addr::from_str(&virtual_ip)?)
 }
 
-async fn assign_ip(pool: &SqlitePool, network_id: i64, subnet: &str) -> anyhow::Result<Ipv4Addr> {
+async fn assign_ip<'e, E>(executor: E, network_id: i64, subnet: &str) -> anyhow::Result<Ipv4Addr>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let parts: Vec<&str> = subnet.split('/').collect();
     if parts.len() != 2 {
         anyhow::bail!("invalid subnet format");
@@ -281,7 +361,7 @@ async fn assign_ip(pool: &SqlitePool, network_id: i64, subnet: &str) -> anyhow::
     let rows: Vec<(String,)> =
         sqlx::query_as("SELECT virtual_ip FROM members WHERE network_id = ?")
             .bind(network_id)
-            .fetch_all(pool)
+            .fetch_all(executor)
             .await?;
 
     for row in rows {
@@ -348,8 +428,8 @@ pub async fn list_peers(
             .decode(&public_key_b64)
             .unwrap_or_default();
         peers.push(lanlink_proto::PeerInfo {
-            node_id: lanlink_proto::NodeId(node_id),
-            virtual_ip: lanlink_proto::VirtualIp(Ipv4Addr::from_str(&ip_str)?),
+            node_id: lanlink_types::NodeId(node_id),
+            virtual_ip: lanlink_types::VirtualIp(Ipv4Addr::from_str(&ip_str)?),
             public_key,
             direct_candidates,
             relay_candidates,
@@ -360,6 +440,20 @@ pub async fn list_peers(
         });
     }
     Ok(peers)
+}
+
+pub async fn is_member(
+    pool: &SqlitePool,
+    network_id: i64,
+    node_id: &[u8; 8],
+) -> anyhow::Result<bool> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT id FROM members WHERE network_id = ? AND node_id = ? LIMIT 1")
+            .bind(network_id)
+            .bind(node_id.as_slice())
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.is_some())
 }
 
 pub async fn update_candidates(
@@ -488,10 +582,17 @@ pub async fn record_telemetry(
     pool: &SqlitePool,
     report: &lanlink_proto::telemetry::TelemetryReport,
 ) -> anyhow::Result<()> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now = u64_to_i64_saturating(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        "received_at",
+    );
+
+    let uptime_seconds = u64_to_i64_saturating(report.uptime_seconds, "uptime_seconds");
+    let tx_bytes = u64_to_i64_saturating(report.tx_bytes, "tx_bytes");
+    let rx_bytes = u64_to_i64_saturating(report.rx_bytes, "rx_bytes");
 
     sqlx::query(
         "INSERT INTO telemetry
@@ -502,18 +603,28 @@ pub async fn record_telemetry(
     .bind(now)
     .bind(&report.version)
     .bind(&report.platform)
-    .bind(report.uptime_seconds as i64)
+    .bind(uptime_seconds)
     .bind(report.peer_count as i64)
     .bind(report.direct_peer_count as i64)
     .bind(report.relay_peer_count as i64)
     .bind(if report.gateway_enabled { 1 } else { 0 })
     .bind(if report.firewall_enabled { 1 } else { 0 })
-    .bind(report.tx_bytes as i64)
-    .bind(report.rx_bytes as i64)
+    .bind(tx_bytes)
+    .bind(rx_bytes)
     .execute(pool)
     .await?;
 
     Ok(())
+}
+
+fn u64_to_i64_saturating(value: u64, field: &str) -> i64 {
+    match i64::try_from(value) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!(%field, %value, "u64 value does not fit into i64, saturating to i64::MAX");
+            i64::MAX
+        }
+    }
 }
 
 pub async fn aggregate_metrics(
@@ -591,13 +702,207 @@ pub async fn delete_member(
     network_id: i64,
     node_id: &[u8; 8],
 ) -> anyhow::Result<bool> {
-    let rows = sqlx::query(
-        "DELETE FROM members WHERE network_id = ? AND node_id = ?",
-    )
-    .bind(network_id)
-    .bind(node_id.as_slice())
-    .execute(pool)
-    .await?
-    .rows_affected();
+    let rows = sqlx::query("DELETE FROM members WHERE network_id = ? AND node_id = ?")
+        .bind(network_id)
+        .bind(node_id.as_slice())
+        .execute(pool)
+        .await?
+        .rows_affected();
     Ok(rows > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn u64_to_i64_saturating_normal_and_overflow() {
+        assert_eq!(u64_to_i64_saturating(42, "x"), 42);
+        assert_eq!(u64_to_i64_saturating(i64::MAX as u64, "x"), i64::MAX);
+        assert_eq!(u64_to_i64_saturating(i64::MAX as u64 + 1, "x"), i64::MAX);
+        assert_eq!(u64_to_i64_saturating(u64::MAX, "x"), i64::MAX);
+    }
+
+    #[tokio::test]
+    async fn record_telemetry_saturates_u64_overflow() -> anyhow::Result<()> {
+        let pool = connect_test().await?;
+        let report = lanlink_proto::telemetry::TelemetryReport {
+            version: "0.0.0".into(),
+            platform: "test".into(),
+            uptime_seconds: i64::MAX as u64 + 1,
+            peer_count: 0,
+            direct_peer_count: 0,
+            relay_peer_count: 0,
+            gateway_enabled: false,
+            firewall_enabled: false,
+            tx_bytes: u64::MAX,
+            rx_bytes: u64::MAX,
+            timestamp: "1970-01-01T00:00:00Z".into(),
+        };
+
+        record_telemetry(&pool, &report).await?;
+
+        let row: (i64, i64, i64) = sqlx::query_as(
+            "SELECT uptime_seconds, tx_bytes, rx_bytes FROM telemetry ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await?;
+
+        assert_eq!(row.0, i64::MAX);
+        assert_eq!(row.1, i64::MAX);
+        assert_eq!(row.2, i64::MAX);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_schema_sets_user_version() -> anyhow::Result<()> {
+        let pool = connect_test().await?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_schema_migrates_old_database() -> anyhow::Result<()> {
+        let opts = SqliteConnectOptions::new().in_memory(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await?;
+
+        // Simulate a pre-M4 database that lacks all relay/gateway columns.
+        sqlx::query(
+            r#"
+            CREATE TABLE networks (
+                id INTEGER PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                subnet TEXT NOT NULL
+            );
+            CREATE TABLE members (
+                id INTEGER PRIMARY KEY,
+                network_id INTEGER NOT NULL,
+                node_id BLOB NOT NULL,
+                public_key TEXT NOT NULL,
+                virtual_ip TEXT NOT NULL,
+                direct_candidates TEXT NOT NULL DEFAULT '[]',
+                last_seen INTEGER NOT NULL,
+                UNIQUE(network_id, node_id)
+            );
+            CREATE TABLE telemetry (
+                id INTEGER PRIMARY KEY,
+                received_at INTEGER NOT NULL,
+                version TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                uptime_seconds INTEGER NOT NULL,
+                peer_count INTEGER NOT NULL,
+                direct_peer_count INTEGER NOT NULL,
+                relay_peer_count INTEGER NOT NULL,
+                gateway_enabled INTEGER NOT NULL,
+                firewall_enabled INTEGER NOT NULL,
+                tx_bytes INTEGER NOT NULL,
+                rx_bytes INTEGER NOT NULL
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        ensure_schema(&pool).await?;
+
+        assert_column_exists(&pool, "networks", "relay_servers").await;
+        assert_column_exists(&pool, "networks", "tcp_relay_servers").await;
+        assert_column_exists(&pool, "networks", "is_public").await;
+        assert_column_exists(&pool, "members", "relay_candidates").await;
+        assert_column_exists(&pool, "members", "tcp_candidates").await;
+        assert_column_exists(&pool, "members", "tcp_relay_candidates").await;
+        assert_column_exists(&pool, "members", "is_gateway").await;
+        assert_column_exists(&pool, "members", "shared_subnet").await;
+
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_schema_migrates_from_version_1() -> anyhow::Result<()> {
+        let opts = SqliteConnectOptions::new().in_memory(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await?;
+
+        // Simulate M5 schema: relay columns exist, but M6 columns are missing.
+        sqlx::query(
+            r#"
+            CREATE TABLE networks (
+                id INTEGER PRIMARY KEY,
+                name TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                subnet TEXT NOT NULL,
+                relay_servers TEXT NOT NULL DEFAULT '[]',
+                tcp_relay_servers TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE TABLE members (
+                id INTEGER PRIMARY KEY,
+                network_id INTEGER NOT NULL,
+                node_id BLOB NOT NULL,
+                public_key TEXT NOT NULL,
+                virtual_ip TEXT NOT NULL,
+                direct_candidates TEXT NOT NULL DEFAULT '[]',
+                relay_candidates TEXT NOT NULL DEFAULT '[]',
+                last_seen INTEGER NOT NULL,
+                UNIQUE(network_id, node_id)
+            );
+            CREATE TABLE telemetry (
+                id INTEGER PRIMARY KEY,
+                received_at INTEGER NOT NULL,
+                version TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                uptime_seconds INTEGER NOT NULL,
+                peer_count INTEGER NOT NULL,
+                direct_peer_count INTEGER NOT NULL,
+                relay_peer_count INTEGER NOT NULL,
+                gateway_enabled INTEGER NOT NULL,
+                firewall_enabled INTEGER NOT NULL,
+                tx_bytes INTEGER NOT NULL,
+                rx_bytes INTEGER NOT NULL
+            );
+            PRAGMA user_version = 1;
+            "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        ensure_schema(&pool).await?;
+
+        assert_column_exists(&pool, "networks", "is_public").await;
+        assert_column_exists(&pool, "members", "is_gateway").await;
+        assert_column_exists(&pool, "members", "shared_subnet").await;
+        assert_column_exists(&pool, "members", "tcp_candidates").await;
+        assert_column_exists(&pool, "members", "tcp_relay_candidates").await;
+
+        // Version 1 migrations are skipped, so relay columns keep their values.
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        Ok(())
+    }
+
+    async fn assert_column_exists(pool: &SqlitePool, table: &str, column: &str) {
+        let rows: Vec<(i64, String, String, i64, Option<String>, i64)> =
+            sqlx::query_as(&format!("PRAGMA table_info({table})"))
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        assert!(
+            rows.iter().any(|r| r.1 == column),
+            "column {column} should exist in table {table}"
+        );
+    }
 }

@@ -3,10 +3,7 @@
 //! `lanlink-proto` request/response types.
 
 use lanlink_proto::control::ControlRequest;
-use lanlink_proto::{
-    CreateNetworkRequest, CreateNetworkResponse, JoinNetworkRequest, JoinNetworkResponse,
-    PublicNetworkInfo,
-};
+use lanlink_proto::{CreateNetworkRequest, CreateNetworkResponse, JoinNetworkRequest, JoinNetworkResponse, PublicNetworkInfo};
 use rand::RngCore;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -84,7 +81,7 @@ pub async fn run_action(
         } => {
             let req = CreateNetworkRequest {
                 name: name.clone(),
-                password: password.clone(),
+                password: password.clone().into(),
                 is_public: *public,
             };
             let resp: CreateNetworkResponse = client
@@ -108,8 +105,8 @@ pub async fn run_action(
             rand::thread_rng().fill_bytes(&mut node_id);
             let candidate: SocketAddr = "127.0.0.1:9000".parse().expect("static addr parses");
             let req = JoinNetworkRequest {
-                password: password.clone(),
-                node_id: lanlink_proto::NodeId(node_id),
+                password: password.clone().into(),
+                node_id: lanlink_types::NodeId(node_id),
                 public_key: vec![],
                 direct_candidates: vec![candidate],
                 relay_candidates: vec![],
@@ -143,19 +140,16 @@ pub fn dispatch_daemon(action: Action, socket: PathBuf, tx: mpsc::Sender<Event>)
     tokio::spawn(async move {
         let result = match action {
             Action::DaemonDisconnect => {
-                crate::daemon::send_command(
-                    &socket,
-                    ControlRequest::Disconnect,
-                )
-                .await
-                .map(|_| CoordOutcome::Ack)
-            }
-            Action::DaemonStop => {
-                crate::daemon::send_command(&socket, ControlRequest::Stop)
+                crate::daemon::send_command(&socket, ControlRequest::Disconnect)
                     .await
                     .map(|_| CoordOutcome::Ack)
             }
-            _ => Err(anyhow::anyhow!("non-daemon action passed to dispatch_daemon")),
+            Action::DaemonStop => crate::daemon::send_command(&socket, ControlRequest::Stop)
+                .await
+                .map(|_| CoordOutcome::Ack),
+            _ => Err(anyhow::anyhow!(
+                "non-daemon action passed to dispatch_daemon"
+            )),
         }
         .map_err(|e| e.to_string());
         let _ = tx.send(Event::Coord(action, result)).await;

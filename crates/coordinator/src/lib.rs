@@ -23,7 +23,10 @@ pub fn app(
             axum::routing::post(api::resolve_network),
         )
         .route("/networks/:id/join", axum::routing::post(api::join_network))
-        .route("/networks/:id/leave", axum::routing::post(api::leave_network))
+        .route(
+            "/networks/:id/leave",
+            axum::routing::post(api::leave_network),
+        )
         .route(
             "/networks/:id/members",
             axum::routing::get(api::list_members),

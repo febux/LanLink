@@ -9,7 +9,7 @@ async fn create_and_join_network() {
     // Create network
     let create_req = lanlink_proto::CreateNetworkRequest {
         name: "testnet".to_string(),
-        password: "secret".to_string(),
+        password: "secret".into(),
         is_public: true,
     };
     let response = app
@@ -35,8 +35,8 @@ async fn create_and_join_network() {
 
     // Join with correct password
     let join_req = lanlink_proto::JoinNetworkRequest {
-        password: "secret".to_string(),
-        node_id: lanlink_proto::NodeId([1; 8]),
+        password: "secret".into(),
+        node_id: lanlink_types::NodeId([1; 8]),
         public_key: vec![],
         direct_candidates: vec!["127.0.0.1:9000".parse().unwrap()],
         relay_candidates: vec![],
@@ -65,11 +65,12 @@ async fn create_and_join_network() {
     assert_eq!(join_resp.network_id.0, network_id);
     assert_eq!(join_resp.peers.len(), 0); // first peer has no other peers
     assert!(join_resp.is_public);
+    assert_eq!(join_resp.subnet, create_resp.subnet);
 
     // Join with wrong password should fail
     let bad_req = lanlink_proto::JoinNetworkRequest {
-        password: "wrong".to_string(),
-        node_id: lanlink_proto::NodeId([2; 8]),
+        password: "wrong".into(),
+        node_id: lanlink_types::NodeId([2; 8]),
         public_key: vec![],
         direct_candidates: vec![],
         relay_candidates: vec![],
@@ -93,8 +94,8 @@ async fn create_and_join_network() {
 
     // Add a second member and verify list
     let join_req2 = lanlink_proto::JoinNetworkRequest {
-        password: "secret".to_string(),
-        node_id: lanlink_proto::NodeId([3; 8]),
+        password: "secret".into(),
+        node_id: lanlink_types::NodeId([3; 8]),
         public_key: vec![],
         direct_candidates: vec!["127.0.0.1:9001".parse().unwrap()],
         relay_candidates: vec![],
@@ -116,12 +117,43 @@ async fn create_and_join_network() {
         .unwrap();
     assert_eq!(response.status(), axum::http::StatusCode::OK);
 
+    // Member list without authentication is rejected
     let response = app
         .clone()
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
                 .uri(format!("/networks/{}/members", network_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+
+    // Wrong password is rejected
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/networks/{}/members", network_id))
+                .header("Authorization", "wrong")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+
+    // Valid list request
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/networks/{}/members", network_id))
+                .header("Authorization", "secret")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -141,6 +173,105 @@ async fn create_and_join_network() {
 }
 
 #[tokio::test]
+async fn parallel_joins_allocate_distinct_virtual_ips() {
+    let pool = coordinator::db::connect_test().await.unwrap();
+    let app = coordinator::app(pool, vec![], vec![]);
+
+    // Create network
+    let create_req = lanlink_proto::CreateNetworkRequest {
+        name: "par-net".to_string(),
+        password: "secret".into(),
+        is_public: false,
+    };
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/networks")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_string(&create_req).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let create_resp: lanlink_proto::CreateNetworkResponse = serde_json::from_slice(&body).unwrap();
+    let network_id = create_resp.network_id.0;
+
+    // Spawn two parallel joins with different node ids.
+    let join_a = async {
+        let app = app.clone();
+        let req = lanlink_proto::JoinNetworkRequest {
+            password: "secret".into(),
+            node_id: lanlink_types::NodeId([10; 8]),
+            public_key: vec![],
+            direct_candidates: vec!["127.0.0.1:9000".parse().unwrap()],
+            relay_candidates: vec![],
+            tcp_candidates: vec![],
+            tcp_relay_candidates: vec![],
+            shared_subnet: String::new(),
+        };
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/networks/{}/join", network_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: lanlink_proto::JoinNetworkResponse = serde_json::from_slice(&body).unwrap();
+        resp.assigned_ip.0
+    };
+    let join_b = async {
+        let app = app.clone();
+        let req = lanlink_proto::JoinNetworkRequest {
+            password: "secret".into(),
+            node_id: lanlink_types::NodeId([11; 8]),
+            public_key: vec![],
+            direct_candidates: vec!["127.0.0.1:9001".parse().unwrap()],
+            relay_candidates: vec![],
+            tcp_candidates: vec![],
+            tcp_relay_candidates: vec![],
+            shared_subnet: String::new(),
+        };
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/networks/{}/join", network_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&req).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: lanlink_proto::JoinNetworkResponse = serde_json::from_slice(&body).unwrap();
+        resp.assigned_ip.0
+    };
+
+    let (ip_a, ip_b) = tokio::join!(join_a, join_b);
+    assert_ne!(
+        ip_a, ip_b,
+        "parallel joins must receive distinct virtual IPs"
+    );
+}
+
+#[tokio::test]
 async fn leave_network_removes_member_and_rejects_invalid_requests() {
     let pool = coordinator::db::connect_test().await.unwrap();
     let app = coordinator::app(pool, vec![], vec![]);
@@ -148,7 +279,7 @@ async fn leave_network_removes_member_and_rejects_invalid_requests() {
     // Create network
     let create_req = lanlink_proto::CreateNetworkRequest {
         name: "leavenet".to_string(),
-        password: "secret".to_string(),
+        password: "secret".into(),
         is_public: false,
     };
     let response = app
@@ -173,8 +304,8 @@ async fn leave_network_removes_member_and_rejects_invalid_requests() {
 
     // Join a member
     let join_req = lanlink_proto::JoinNetworkRequest {
-        password: "secret".to_string(),
-        node_id: lanlink_proto::NodeId([7; 8]),
+        password: "secret".into(),
+        node_id: lanlink_types::NodeId([7; 8]),
         public_key: vec![],
         direct_candidates: vec!["127.0.0.1:9000".parse().unwrap()],
         relay_candidates: vec![],
@@ -198,7 +329,7 @@ async fn leave_network_removes_member_and_rejects_invalid_requests() {
 
     // Leave with wrong password is rejected
     let bad_leave = lanlink_proto::LeaveNetworkRequest {
-        password: "wrong".to_string(),
+        password: "wrong".into(),
         node_id: join_req.node_id,
     };
     let response = app
@@ -217,8 +348,8 @@ async fn leave_network_removes_member_and_rejects_invalid_requests() {
 
     // Leave with unknown node id is rejected
     let unknown_leave = lanlink_proto::LeaveNetworkRequest {
-        password: "secret".to_string(),
-        node_id: lanlink_proto::NodeId([8; 8]),
+        password: "secret".into(),
+        node_id: lanlink_types::NodeId([8; 8]),
     };
     let response = app
         .clone()
@@ -236,7 +367,7 @@ async fn leave_network_removes_member_and_rejects_invalid_requests() {
 
     // Valid leave removes the member
     let leave_req = lanlink_proto::LeaveNetworkRequest {
-        password: "secret".to_string(),
+        password: "secret".into(),
         node_id: join_req.node_id,
     };
     let response = app
@@ -254,12 +385,43 @@ async fn leave_network_removes_member_and_rejects_invalid_requests() {
     assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
 
     // Member list is now empty
+    // Member list without authentication is rejected
     let response = app
         .clone()
         .oneshot(
             axum::http::Request::builder()
                 .method("GET")
                 .uri(format!("/networks/{}/members", network_id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+
+    // Wrong password is rejected
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/networks/{}/members", network_id))
+                .header("Authorization", "wrong")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+
+    // Valid list request
+    let response = app
+        .clone()
+        .oneshot(
+            axum::http::Request::builder()
+                .method("GET")
+                .uri(format!("/networks/{}/members", network_id))
+                .header("Authorization", "secret")
                 .body(Body::empty())
                 .unwrap(),
         )

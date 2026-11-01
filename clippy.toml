@@ -1,0 +1,5 @@
+# Block synchronous lock methods inside async code paths.
+# Prefer the async `.lock().await` equivalent to avoid blocking the Tokio runtime.
+disallowed-methods = [
+    { path = "tokio::sync::Mutex::blocking_lock", reason = "use lock().await inside async context to avoid blocking the Tokio runtime" },
+]

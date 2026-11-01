@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use lanlink_proto::control::{ControlRequest, ControlResponse};
 use lanlink_proto::status::{StatusRequest, StatusResponse};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::status::StatusState;
@@ -109,7 +109,7 @@ async fn run_server(
                     Ok((stream, _)) => {
                         let state_rx = state_rx.clone();
                         let cmd_tx = cmd_tx.clone();
-                        tokio::spawn(handle_conn(stream, state_rx, cmd_tx));
+                        tokio::spawn(handle_stream(stream, state_rx, cmd_tx));
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "control accept failed");
@@ -181,7 +181,7 @@ async fn run_tcp_server(
                         }
                         let state_rx = state_rx.clone();
                         let cmd_tx = cmd_tx.clone();
-                        tokio::spawn(handle_tcp_conn(stream, state_rx, cmd_tx));
+                        tokio::spawn(handle_stream(stream, state_rx, cmd_tx));
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "control TCP accept failed");
@@ -201,39 +201,12 @@ fn is_loopback(ip: std::net::IpAddr) -> bool {
     }
 }
 
-#[cfg(unix)]
-async fn handle_conn(
-    stream: tokio::net::UnixStream,
+async fn handle_stream<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
     state_rx: watch::Receiver<StatusState>,
     cmd_tx: mpsc::Sender<ControlEnvelope>,
 ) {
-    let (reader_half, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader_half);
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
-        let out = match dispatch_line(line.trim_end(), &state_rx, &cmd_tx).await {
-            Some(bytes) => bytes,
-            None => continue,
-        };
-        if writer.write_all(&out).await.is_err() {
-            break;
-        }
-    }
-}
-
-#[cfg(windows)]
-async fn handle_tcp_conn(
-    stream: tokio::net::TcpStream,
-    state_rx: watch::Receiver<StatusState>,
-    cmd_tx: mpsc::Sender<ControlEnvelope>,
-) {
-    let (reader_half, mut writer) = stream.into_split();
+    let (reader_half, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader_half);
     let mut line = String::new();
     loop {
@@ -261,7 +234,11 @@ async fn dispatch_line(
     // First try to parse a control command.
     if let Ok(req) = serde_json::from_str::<ControlRequest>(line) {
         let (tx, rx) = oneshot::channel();
-        if cmd_tx.send(ControlEnvelope { req, resp: tx }).await.is_err() {
+        if cmd_tx
+            .send(ControlEnvelope { req, resp: tx })
+            .await
+            .is_err()
+        {
             return Some(error_bytes("daemon control channel closed"));
         }
         let resp = match rx.await {
@@ -283,7 +260,9 @@ async fn dispatch_line(
         ));
     }
 
-    Some(error_bytes("bad request: not a control command or status snapshot"))
+    Some(error_bytes(
+        "bad request: not a control command or status snapshot",
+    ))
 }
 
 fn error_bytes(msg: &str) -> Vec<u8> {
@@ -292,7 +271,8 @@ fn error_bytes(msg: &str) -> Vec<u8> {
 }
 
 fn json_bytes<T: serde::Serialize>(value: &T, fallback: &str) -> Vec<u8> {
-    let mut text = serde_json::to_string(value).unwrap_or_else(|_| format!("{{\"error\":\"{}\"}}", fallback));
+    let mut text =
+        serde_json::to_string(value).unwrap_or_else(|_| format!("{{\"error\":\"{}\"}}", fallback));
     text.push('\n');
     text.into_bytes()
 }
@@ -302,7 +282,7 @@ pub fn empty_state() -> StatusState {
     crate::status::StatusState {
         registry: crate::status::StatusRegistry::new(),
         switch: Arc::new(tokio::sync::Mutex::new(lanlink_switch::Switch::new(
-            lanlink_proto::NodeId([0u8; 8]),
+            lanlink_types::NodeId([0u8; 8]),
             lanlink_crypto::StaticSession::new([0u8; 32]),
         ))),
         metrics: Arc::new(crate::Metrics::default()),

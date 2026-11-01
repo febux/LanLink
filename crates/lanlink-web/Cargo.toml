@@ -11,6 +11,7 @@ name = "lanlink-web"
 path = "src/main.rs"
 
 [dependencies]
+lanlink-types = { path = "../lanlink-types" }
 anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }

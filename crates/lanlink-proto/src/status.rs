@@ -9,7 +9,8 @@
 
 use std::net::SocketAddr;
 
-use crate::{NetworkId, NodeId, VirtualIp};
+use crate::NetworkId;
+use lanlink_types::{NodeId, VirtualIp};
 
 /// Request a status client can send to the daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -110,7 +111,7 @@ pub struct StatusSnapshot {
 
 /// Response envelope for one [`StatusRequest`] line.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(untagged)]
+#[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum StatusResponse {
     Snapshot(StatusSnapshot),
     Error { error: String },

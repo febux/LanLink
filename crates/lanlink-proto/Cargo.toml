@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 serde.workspace = true
+lanlink-types = { path = "../lanlink-types" }
 
 [dev-dependencies]
 serde_json.workspace = true

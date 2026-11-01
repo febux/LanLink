@@ -55,5 +55,5 @@ async fn noise_identity_node_ids_match() {
     let id = node_identity(7);
     let node_id = id.node_id();
     let pk = id.public_key();
-    assert_eq!(node_id.0, pk[..lanlink_proto::NODE_ID_LEN]);
+    assert_eq!(node_id.0, pk[..lanlink_types::NODE_ID_LEN]);
 }

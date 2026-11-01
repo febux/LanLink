@@ -83,46 +83,23 @@ pub async fn send_request(
 
     #[cfg(unix)]
     {
-        let mut stream = connect_unix(&candidates).await?;
-        transact_unix(&mut stream, &req).await
+        let stream = connect_unix(&candidates).await?;
+        transact(stream, req).await
     }
     #[cfg(not(unix))]
     {
-        let mut stream = connect_tcp(&candidates).await?;
-        transact_tcp(&mut stream, &req).await
+        let stream = connect_tcp(&candidates).await?;
+        transact(stream, req).await
     }
 }
 
-#[cfg(unix)]
-async fn transact_unix(
-    stream: &mut tokio::net::UnixStream,
-    req: &ControlRequest,
+async fn transact<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    mut stream: S,
+    req: ControlRequest,
 ) -> anyhow::Result<ControlResponse> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let body = serde_json::to_string(req)?;
-    stream.write_all(body.as_bytes()).await?;
-    stream.write_all(b"\n").await?;
-    stream.shutdown().await?;
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
-    if line.is_empty() {
-        anyhow::bail!("control socket closed without response");
-    }
-    serde_json::from_str(line.trim_end())
-        .map_err(|e| anyhow::anyhow!("invalid control response: {e}"))
-}
-
-#[cfg(not(unix))]
-async fn transact_tcp(
-    stream: &mut tokio::net::TcpStream,
-    req: &ControlRequest,
-) -> anyhow::Result<ControlResponse> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    let body = serde_json::to_string(req)?;
+    let body = serde_json::to_string(&req)?;
     stream.write_all(body.as_bytes()).await?;
     stream.write_all(b"\n").await?;
     stream.shutdown().await?;
@@ -169,8 +146,12 @@ pub async fn stop_daemon(override_socket: Option<String>, timeout: Duration) -> 
 
         match tokio::time::timeout(timeout, reader.read_line(&mut line)).await {
             Ok(Ok(0)) => Ok(()),
-            Ok(Ok(_)) => Err(anyhow::anyhow!("daemon sent unexpected data after stop ack")),
-            Ok(Err(e)) => Err(anyhow::anyhow!("control socket error while waiting for shutdown: {e}")),
+            Ok(Ok(_)) => Err(anyhow::anyhow!(
+                "daemon sent unexpected data after stop ack"
+            )),
+            Ok(Err(e)) => Err(anyhow::anyhow!(
+                "control socket error while waiting for shutdown: {e}"
+            )),
             Err(_) => Err(anyhow::anyhow!(
                 "timed out waiting for daemon to exit after stop ack"
             )),
@@ -202,8 +183,12 @@ pub async fn stop_daemon(override_socket: Option<String>, timeout: Duration) -> 
 
         match tokio::time::timeout(timeout, reader.read_line(&mut line)).await {
             Ok(Ok(0)) => Ok(()),
-            Ok(Ok(_)) => Err(anyhow::anyhow!("daemon sent unexpected data after stop ack")),
-            Ok(Err(e)) => Err(anyhow::anyhow!("control socket error while waiting for shutdown: {e}")),
+            Ok(Ok(_)) => Err(anyhow::anyhow!(
+                "daemon sent unexpected data after stop ack"
+            )),
+            Ok(Err(e)) => Err(anyhow::anyhow!(
+                "control socket error while waiting for shutdown: {e}"
+            )),
             Err(_) => Err(anyhow::anyhow!(
                 "timed out waiting for daemon to exit after stop ack"
             )),
@@ -243,7 +228,9 @@ pub fn print_status(snap: &lanlink_proto::status::StatusSnapshot) {
                 .as_ref()
                 .map(|a| a.to_string())
                 .unwrap_or_else(|| "-".into()),
-            p.latency_ms.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+            p.latency_ms
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "-".into()),
             p.last_seen_secs_ago
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "-".into()),

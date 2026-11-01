@@ -16,6 +16,11 @@ use std::time::{Duration, Instant};
 
 pub use self::table::{MacEntry, SwitchTable};
 
+/// Parse a 6-byte MAC address from a byte slice.
+fn parse_mac(bytes: &[u8]) -> Option<[u8; 6]> {
+    bytes.try_into().ok()
+}
+
 /// Inner packet layout used by the switch:
 /// ```text
 /// [sender node id: 8 bytes]
@@ -25,8 +30,8 @@ pub use self::table::{MacEntry, SwitchTable};
 /// [total chunks: 2 bytes BE]
 /// [chunk payload: variable]
 /// ```
-const INNER_HEADER_LEN: usize = lanlink_proto::NODE_ID_LEN + 8 + 4 + 2 + 2;
-const MAX_CHUNK_PAYLOAD: usize = lanlink_proto::MAX_INNER_PAYLOAD - INNER_HEADER_LEN;
+const INNER_HEADER_LEN: usize = lanlink_types::DATA_CHUNK_HEADER_LEN;
+const MAX_CHUNK_PAYLOAD: usize = lanlink_types::MAX_INNER_PAYLOAD - INNER_HEADER_LEN;
 const FRAGMENT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAC_TABLE_MAX_AGE: Duration = Duration::from_secs(300);
 
@@ -54,7 +59,7 @@ pub enum Transport {
 /// One outgoing packet produced by the switch.
 #[derive(Debug, Clone)]
 pub struct Outgoing {
-    pub peer: lanlink_proto::NodeId,
+    pub peer: lanlink_types::NodeId,
     pub transport: Transport,
     pub addr: SocketAddr,
     pub packet: Vec<u8>,
@@ -102,7 +107,7 @@ pub struct PeerState {
 /// Read-only per-peer statistics snapshot used by the local status API.
 #[derive(Debug, Clone)]
 pub struct PeerStat {
-    pub node_id: lanlink_proto::NodeId,
+    pub node_id: lanlink_types::NodeId,
     pub addr: SocketAddr,
     pub transport: Transport,
     pub last_seen: Instant,
@@ -113,7 +118,7 @@ pub struct PeerStat {
 
 /// Result of feeding a network packet into the switch.
 #[derive(Debug)]
-pub enum UdpOutcome {
+pub enum InboundOutcome {
     /// A complete Ethernet frame to write to the local TAP device.
     Frame(Vec<u8>),
     /// A control packet (e.g. a PONG reply) to send back to the packet's
@@ -135,16 +140,16 @@ struct ReassemblyBuffer {
 
 /// Inner payload length of a control probe packet: sender id + counter +
 /// probe timestamp (milliseconds since the sender's switch was created).
-const PROBE_INNER_LEN: usize = lanlink_proto::NODE_ID_LEN + 8 + 8;
+const PROBE_INNER_LEN: usize = lanlink_types::NODE_ID_LEN + 8 + 8;
 
 /// A MAC-learning virtual Ethernet switch with integrated chunking and reassembly.
 pub struct Switch {
-    local: lanlink_proto::NodeId,
+    local: lanlink_types::NodeId,
     local_identity: Option<lanlink_crypto::Identity>,
     psk_session: lanlink_crypto::StaticSession,
     mac_table: SwitchTable,
-    peers: HashMap<lanlink_proto::NodeId, PeerState>,
-    fragments: HashMap<(lanlink_proto::NodeId, u32), ReassemblyBuffer>,
+    peers: HashMap<lanlink_types::NodeId, PeerState>,
+    fragments: HashMap<(lanlink_types::NodeId, u32), ReassemblyBuffer>,
     next_frame_id: u32,
     tx_counter: u64,
     last_prune: Instant,
@@ -155,7 +160,7 @@ pub struct Switch {
 
 impl Switch {
     /// Create a new switch for the local node with the given network key session.
-    pub fn new(local: lanlink_proto::NodeId, psk_session: lanlink_crypto::StaticSession) -> Self {
+    pub fn new(local: lanlink_types::NodeId, psk_session: lanlink_crypto::StaticSession) -> Self {
         Self {
             local,
             local_identity: None,
@@ -177,7 +182,7 @@ impl Switch {
     }
 
     /// Register or update a peer that the switch may send frames to.
-    pub fn add_peer(&mut self, id: lanlink_proto::NodeId, addr: SocketAddr) {
+    pub fn add_peer(&mut self, id: lanlink_types::NodeId, addr: SocketAddr) {
         match self.peers.get_mut(&id) {
             Some(p) => {
                 p.addr = addr;
@@ -204,7 +209,7 @@ impl Switch {
     }
 
     /// Set the transport used to reach a peer.
-    pub fn set_peer_transport(&mut self, id: lanlink_proto::NodeId, transport: Transport) {
+    pub fn set_peer_transport(&mut self, id: lanlink_types::NodeId, transport: Transport) {
         if let Some(p) = self.peers.get_mut(&id) {
             p.transport = transport;
         }
@@ -212,14 +217,14 @@ impl Switch {
 
     /// Set the advertised Ed25519 public key for a peer. This enables Noise
     /// handshakes with that peer.
-    pub fn set_peer_public_key(&mut self, id: lanlink_proto::NodeId, public_key: [u8; 32]) {
+    pub fn set_peer_public_key(&mut self, id: lanlink_types::NodeId, public_key: [u8; 32]) {
         if let Some(p) = self.peers.get_mut(&id) {
             p.public_key = Some(public_key);
         }
     }
 
     /// Remove a peer and any MAC table entries that pointed to it.
-    pub fn remove_peer(&mut self, id: lanlink_proto::NodeId) {
+    pub fn remove_peer(&mut self, id: lanlink_types::NodeId) {
         self.peers.remove(&id);
         self.mac_table.retain(|_, entry| entry.peer != id);
         self.fragments.retain(|(sender, _), _| sender != &id);
@@ -240,7 +245,7 @@ impl Switch {
         }
 
         // Remove peers that disappeared from the coordinator view.
-        let gone: Vec<lanlink_proto::NodeId> = self
+        let gone: Vec<lanlink_types::NodeId> = self
             .peers
             .keys()
             .copied()
@@ -273,12 +278,12 @@ impl Switch {
 
         let dst_mac = &frame[0..6];
         let _src_mac = &frame[6..12];
-        let flood = SwitchTable::is_flood_dest(dst_mac.try_into().expect("six bytes"));
+        let dst = parse_mac(dst_mac).ok_or(SwitchError::Malformed("dst mac is not six bytes"))?;
+        let flood = SwitchTable::is_flood_dest(dst);
 
-        let destinations: Vec<lanlink_proto::NodeId> = if flood {
+        let destinations: Vec<lanlink_types::NodeId> = if flood {
             self.peers.keys().copied().collect()
         } else {
-            let dst = dst_mac.try_into().expect("six bytes");
             match self.mac_table.lookup(dst) {
                 Some(entry) => vec![entry.peer],
                 None => self.peers.keys().copied().collect(),
@@ -336,7 +341,7 @@ impl Switch {
                 let counter = self.tx_counter;
                 self.tx_counter = self.tx_counter.wrapping_add(1);
                 let inner = build_inner(self.local, counter, frame_id, idx as u16, total, chunk);
-                let packet = self.seal(receiver, lanlink_proto::DATA_PACKET_TYPE, &inner)?;
+                let packet = self.seal(receiver, lanlink_types::DATA_PACKET_TYPE, &inner)?;
                 sent_bytes += packet.len() as u64;
                 out.push(Outgoing {
                     peer: receiver,
@@ -356,7 +361,7 @@ impl Switch {
 
     /// True if the peer has advertised an Ed25519 public key and a local
     /// identity is configured so we can run Noise.
-    fn peer_supports_noise(&self, peer: lanlink_proto::NodeId) -> bool {
+    fn peer_supports_noise(&self, peer: lanlink_types::NodeId) -> bool {
         self.local_identity.is_some()
             && self
                 .peers
@@ -366,7 +371,7 @@ impl Switch {
     }
 
     /// Simple classification of a peer's current crypto state.
-    fn crypto_kind(&self, peer: lanlink_proto::NodeId) -> Option<CryptoKind> {
+    fn crypto_kind(&self, peer: lanlink_types::NodeId) -> Option<CryptoKind> {
         self.peers.get(&peer).map(|p| match p.crypto {
             PeerCrypto::Psk => CryptoKind::Psk,
             PeerCrypto::Handshaking(_) => CryptoKind::Handshaking,
@@ -375,7 +380,7 @@ impl Switch {
     }
 
     /// Update the reachable address for a known peer.
-    pub fn set_peer_addr(&mut self, id: lanlink_proto::NodeId, addr: SocketAddr) {
+    pub fn set_peer_addr(&mut self, id: lanlink_types::NodeId, addr: SocketAddr) {
         if let Some(peer) = self.peers.get_mut(&id) {
             if peer.addr != addr {
                 tracing::info!(?id, old = %peer.addr, new = %addr, "updated peer address");
@@ -386,7 +391,7 @@ impl Switch {
     }
 
     /// Return a snapshot of known peer ids and their current addresses.
-    pub fn peer_addrs(&self) -> Vec<(lanlink_proto::NodeId, SocketAddr)> {
+    pub fn peer_addrs(&self) -> Vec<(lanlink_types::NodeId, SocketAddr)> {
         self.peers
             .iter()
             .map(|(id, state)| (*id, state.addr))
@@ -413,24 +418,24 @@ impl Switch {
     /// transport and address so the daemon can route it.
     pub fn seal_keepalive(
         &mut self,
-        peer: lanlink_proto::NodeId,
+        peer: lanlink_types::NodeId,
     ) -> Result<Outgoing, lanlink_crypto::CryptoError> {
         let counter = self.tx_counter;
         self.tx_counter = self.tx_counter.wrapping_add(1);
         let inner = build_probe_inner(self.local, counter, 0);
-        self.seal_outgoing(peer, lanlink_proto::KEEPALIVE_PACKET_TYPE, &inner)
+        self.seal_outgoing(peer, lanlink_types::KEEPALIVE_PACKET_TYPE, &inner)
     }
 
     /// Build a sealed latency-probe packet.
     pub fn seal_ping(
         &mut self,
-        peer: lanlink_proto::NodeId,
+        peer: lanlink_types::NodeId,
         now_ms: u64,
     ) -> Result<Outgoing, lanlink_crypto::CryptoError> {
         let counter = self.tx_counter;
         self.tx_counter = self.tx_counter.wrapping_add(1);
         let inner = build_probe_inner(self.local, counter, now_ms);
-        self.seal_outgoing(peer, lanlink_proto::PING_PACKET_TYPE, &inner)
+        self.seal_outgoing(peer, lanlink_types::PING_PACKET_TYPE, &inner)
     }
 
     /// Milliseconds elapsed since this switch was created (probe clock).
@@ -441,19 +446,19 @@ impl Switch {
     /// Build a sealed PONG reply echoing the probe timestamp.
     fn seal_pong(
         &mut self,
-        peer: lanlink_proto::NodeId,
+        peer: lanlink_types::NodeId,
         timestamp_ms: u64,
     ) -> Result<Vec<u8>, lanlink_crypto::CryptoError> {
         let counter = self.tx_counter;
         self.tx_counter = self.tx_counter.wrapping_add(1);
         let inner = build_probe_inner(self.local, counter, timestamp_ms);
-        self.seal(peer, lanlink_proto::PONG_PACKET_TYPE, &inner)
+        self.seal(peer, lanlink_types::PONG_PACKET_TYPE, &inner)
     }
 
     /// Seal an inner payload and return a fully-routed outgoing packet.
     fn seal_outgoing(
         &mut self,
-        peer: lanlink_proto::NodeId,
+        peer: lanlink_types::NodeId,
         packet_type: u8,
         inner: &[u8],
     ) -> Result<Outgoing, lanlink_crypto::CryptoError> {
@@ -476,7 +481,7 @@ impl Switch {
     /// Seal an inner payload for `receiver` using the best available crypto.
     fn seal(
         &mut self,
-        receiver: lanlink_proto::NodeId,
+        receiver: lanlink_types::NodeId,
         packet_type: u8,
         inner: &[u8],
     ) -> Result<Vec<u8>, lanlink_crypto::CryptoError> {
@@ -484,10 +489,10 @@ impl Switch {
             if let PeerCrypto::Noise(ref mut session) = peer.crypto {
                 let ciphertext = session.encrypt(inner)?;
                 let mut packet =
-                    Vec::with_capacity(4 + 2 * lanlink_proto::NODE_ID_LEN + ciphertext.len());
-                packet.push(lanlink_proto::WIRE_PROTOCOL_VERSION);
+                    Vec::with_capacity(4 + 2 * lanlink_types::NODE_ID_LEN + ciphertext.len());
+                packet.push(lanlink_types::WIRE_PROTOCOL_VERSION);
                 packet.push(packet_type);
-                packet.push(lanlink_proto::FLAG_NOISE);
+                packet.push(lanlink_types::FLAG_NOISE);
                 packet.push(0x00);
                 packet.extend_from_slice(&receiver.0);
                 packet.extend_from_slice(&self.local.0);
@@ -500,7 +505,7 @@ impl Switch {
 
     fn noise_session_mut(
         &mut self,
-        peer: lanlink_proto::NodeId,
+        peer: lanlink_types::NodeId,
     ) -> Option<&mut lanlink_crypto::NoiseSession> {
         match self.peers.get_mut(&peer)?.crypto {
             PeerCrypto::Noise(ref mut s) => Some(s),
@@ -513,29 +518,24 @@ impl Switch {
     /// packet on the peer's current transport/address.
     pub fn initiate_handshake(
         &mut self,
-        peer: lanlink_proto::NodeId,
+        peer: lanlink_types::NodeId,
     ) -> Result<Outgoing, SwitchError> {
         let identity = self
             .local_identity
             .as_ref()
             .ok_or(SwitchError::Rejected("no local identity"))?;
-        let (public_key, addr, transport) = {
-            let p = self
-                .peers
-                .get(&peer)
-                .ok_or(SwitchError::Rejected("peer missing"))?;
-            (
-                p.public_key
-                    .ok_or(SwitchError::Rejected("peer has no public key"))?,
-                p.addr,
-                p.transport,
-            )
+        let Some(p) = self.peers.get_mut(&peer) else {
+            return Err(SwitchError::Rejected("peer missing"));
         };
+        let public_key = p
+            .public_key
+            .ok_or(SwitchError::Rejected("peer has no public key"))?;
+        let addr = p.addr;
+        let transport = p.transport;
 
         let mut handshake = lanlink_crypto::Handshake::new_initiator(identity, public_key)?;
         let msg = handshake.write_message()?;
-        let peer_state = self.peers.get_mut(&peer).unwrap();
-        peer_state.crypto = PeerCrypto::Handshaking(handshake);
+        p.crypto = PeerCrypto::Handshaking(handshake);
         let packet = build_handshake_packet(peer, self.local, &msg);
         Ok(Outgoing {
             peer,
@@ -550,9 +550,9 @@ impl Switch {
     /// completes.
     fn on_handshake_packet(
         &mut self,
-        sender: lanlink_proto::NodeId,
+        sender: lanlink_types::NodeId,
         noise_msg: &[u8],
-    ) -> Result<UdpOutcome, SwitchError> {
+    ) -> Result<InboundOutcome, SwitchError> {
         let identity = self
             .local_identity
             .as_ref()
@@ -563,20 +563,20 @@ impl Switch {
         // it; the daemon adds peers from the coordinator before data arrives.
         let peer = match self.peers.get_mut(&sender) {
             Some(p) => p,
-            None => return Ok(UdpOutcome::Ignored),
+            None => return Ok(InboundOutcome::Ignored),
         };
 
         let mut handshake = match std::mem::replace(&mut peer.crypto, PeerCrypto::Psk) {
             PeerCrypto::Psk => {
                 if peer.public_key.is_none() {
-                    return Ok(UdpOutcome::Ignored);
+                    return Ok(InboundOutcome::Ignored);
                 }
                 lanlink_crypto::Handshake::new_responder(identity)?
             }
             PeerCrypto::Handshaking(hs) => hs,
             PeerCrypto::Noise(_) => {
                 // Already have a session; ignore spurious handshake packet.
-                return Ok(UdpOutcome::Ignored);
+                return Ok(InboundOutcome::Ignored);
             }
         };
 
@@ -595,15 +595,15 @@ impl Switch {
 
         Ok(match reply {
             Some(msg) => {
-                UdpOutcome::HandshakeReply(build_handshake_packet(sender, self.local, &msg))
+                InboundOutcome::HandshakeReply(build_handshake_packet(sender, self.local, &msg))
             }
-            None => UdpOutcome::Ignored,
+            None => InboundOutcome::Ignored,
         })
     }
 
     fn verify_and_install_session(
         &mut self,
-        peer: lanlink_proto::NodeId,
+        peer: lanlink_types::NodeId,
         session: lanlink_crypto::NoiseSession,
     ) -> Result<(), SwitchError> {
         let peer_state = self
@@ -626,54 +626,54 @@ impl Switch {
     }
 
     /// Process a network packet received from the network. Returns
-    /// [`UdpOutcome::Frame`] with a complete Ethernet frame for the local TAP,
-    /// [`UdpOutcome::Reply`] with a control packet to send back,
-    /// [`UdpOutcome::HandshakeReply`] for handshake messages, or
-    /// [`UdpOutcome::Ignored`] for keepalives, pings, drops, replays, and
+    /// [`InboundOutcome::Frame`] with a complete Ethernet frame for the local TAP,
+    /// [`InboundOutcome::Reply`] with a control packet to send back,
+    /// [`InboundOutcome::HandshakeReply`] for handshake messages, or
+    /// [`InboundOutcome::Ignored`] for keepalives, pings, drops, replays, and
     /// fragments that are still incomplete.
-    pub fn on_packet(
+    pub fn on_inbound_packet(
         &mut self,
         from: SocketAddr,
         packet: &[u8],
-    ) -> Result<UdpOutcome, SwitchError> {
+    ) -> Result<InboundOutcome, SwitchError> {
         if packet.len() < 4 {
             return Err(SwitchError::Malformed("packet too short"));
         }
-        if packet[0] != lanlink_proto::WIRE_PROTOCOL_VERSION {
+        if packet[0] != lanlink_types::WIRE_PROTOCOL_VERSION {
             return Err(SwitchError::Malformed("unknown wire protocol version"));
         }
 
         let ptype = packet[1];
         let flags = packet[2];
 
-        if packet.len() < 4 + lanlink_proto::NODE_ID_LEN {
+        if packet.len() < 4 + lanlink_types::NODE_ID_LEN {
             return Err(SwitchError::Malformed("packet too short for receiver"));
         }
-        let mut receiver = [0u8; lanlink_proto::NODE_ID_LEN];
-        receiver.copy_from_slice(&packet[4..4 + lanlink_proto::NODE_ID_LEN]);
-        let receiver = lanlink_proto::NodeId(receiver);
+        let mut receiver = [0u8; lanlink_types::NODE_ID_LEN];
+        receiver.copy_from_slice(&packet[4..4 + lanlink_types::NODE_ID_LEN]);
+        let receiver = lanlink_types::NodeId(receiver);
 
         if receiver != self.local {
             // Not addressed to us. This is normal on shared ports / broadcasts
             // arriving at the wrong receiver id.
-            return Ok(UdpOutcome::Ignored);
+            return Ok(InboundOutcome::Ignored);
         }
 
-        if ptype == lanlink_proto::NOISE_HANDSHAKE_PACKET_TYPE {
-            if packet.len() < 4 + lanlink_proto::NODE_ID_LEN + lanlink_proto::NODE_ID_LEN {
+        if ptype == lanlink_types::NOISE_HANDSHAKE_PACKET_TYPE {
+            if packet.len() < 4 + lanlink_types::NODE_ID_LEN + lanlink_types::NODE_ID_LEN {
                 return Err(SwitchError::Malformed("handshake packet too short"));
             }
-            let mut sender = [0u8; lanlink_proto::NODE_ID_LEN];
+            let mut sender = [0u8; lanlink_types::NODE_ID_LEN];
             sender.copy_from_slice(
-                &packet[4 + lanlink_proto::NODE_ID_LEN..4 + 2 * lanlink_proto::NODE_ID_LEN],
+                &packet[4 + lanlink_types::NODE_ID_LEN..4 + 2 * lanlink_types::NODE_ID_LEN],
             );
-            let sender = lanlink_proto::NodeId(sender);
-            let noise_msg = &packet[4 + 2 * lanlink_proto::NODE_ID_LEN..];
+            let sender = lanlink_types::NodeId(sender);
+            let noise_msg = &packet[4 + 2 * lanlink_types::NODE_ID_LEN..];
             return self.on_handshake_packet(sender, noise_msg);
         }
 
         let packet_len = packet.len();
-        let (ptype, inner) = if flags & lanlink_proto::FLAG_NOISE != 0 {
+        let (ptype, inner) = if flags & lanlink_types::FLAG_NOISE != 0 {
             self.open_noise(packet)?
         } else {
             let (got_receiver, got_ptype, plaintext) = self.psk_session.open(packet)?;
@@ -686,16 +686,16 @@ impl Switch {
     }
 
     fn open_noise(&mut self, packet: &[u8]) -> Result<(u8, Vec<u8>), SwitchError> {
-        if packet.len() < 4 + 2 * lanlink_proto::NODE_ID_LEN {
+        if packet.len() < 4 + 2 * lanlink_types::NODE_ID_LEN {
             return Err(SwitchError::Malformed("noise packet too short"));
         }
         let ptype = packet[1];
-        let mut sender = [0u8; lanlink_proto::NODE_ID_LEN];
+        let mut sender = [0u8; lanlink_types::NODE_ID_LEN];
         sender.copy_from_slice(
-            &packet[4 + lanlink_proto::NODE_ID_LEN..4 + 2 * lanlink_proto::NODE_ID_LEN],
+            &packet[4 + lanlink_types::NODE_ID_LEN..4 + 2 * lanlink_types::NODE_ID_LEN],
         );
-        let sender = lanlink_proto::NodeId(sender);
-        let ciphertext = &packet[4 + 2 * lanlink_proto::NODE_ID_LEN..];
+        let sender = lanlink_types::NodeId(sender);
+        let ciphertext = &packet[4 + 2 * lanlink_types::NODE_ID_LEN..];
 
         let session = self
             .noise_session_mut(sender)
@@ -710,20 +710,20 @@ impl Switch {
         ptype: u8,
         inner: &[u8],
         packet_len: usize,
-    ) -> Result<UdpOutcome, SwitchError> {
-        if inner.len() < lanlink_proto::NODE_ID_LEN {
+    ) -> Result<InboundOutcome, SwitchError> {
+        if inner.len() < lanlink_types::NODE_ID_LEN {
             return Err(SwitchError::Malformed("inner plaintext too short"));
         }
 
-        let sender = lanlink_proto::NodeId(
-            inner[0..lanlink_proto::NODE_ID_LEN]
+        let sender = lanlink_types::NodeId(
+            inner[0..lanlink_types::NODE_ID_LEN]
                 .try_into()
                 .expect("eight bytes"),
         );
 
         // Keepalives carry sender id + counter but no replay-protected state;
         // they refresh peer liveness and learn NAT rebinds.
-        if ptype == lanlink_proto::KEEPALIVE_PACKET_TYPE {
+        if ptype == lanlink_types::KEEPALIVE_PACKET_TYPE {
             if let Some(peer) = self.peers.get_mut(&sender) {
                 if peer.addr != from {
                     tracing::info!(?sender, old = %peer.addr, new = %from, "peer address changed");
@@ -731,20 +731,20 @@ impl Switch {
                 }
                 peer.last_seen = Instant::now();
             }
-            return Ok(UdpOutcome::Ignored);
+            return Ok(InboundOutcome::Ignored);
         }
 
-        if inner.len() < lanlink_proto::NODE_ID_LEN + 8 {
+        if inner.len() < lanlink_types::NODE_ID_LEN + 8 {
             return Err(SwitchError::Malformed("inner plaintext too short"));
         }
-        let counter = read_u64(&inner[lanlink_proto::NODE_ID_LEN..lanlink_proto::NODE_ID_LEN + 8]);
+        let counter = read_u64(&inner[lanlink_types::NODE_ID_LEN..lanlink_types::NODE_ID_LEN + 8]);
 
         // Update peer state in a scoped block so the mutable borrow ends before
         // we call back into `self` for seal/probe_clock below.
         let accepted = {
             let Some(peer) = self.peers.get_mut(&sender) else {
                 tracing::debug!(?sender, %from, "dropping packet from unknown peer");
-                return Ok(UdpOutcome::Ignored);
+                return Ok(InboundOutcome::Ignored);
             };
 
             // NAT rebind: remember the address this peer actually reached us from.
@@ -765,27 +765,27 @@ impl Switch {
 
         if !accepted {
             tracing::debug!(?sender, counter, "replay window rejected packet");
-            return Ok(UdpOutcome::Ignored);
+            return Ok(InboundOutcome::Ignored);
         }
 
         // Latency probes: a PING timestamp comes from the sender's probe
         // clock and is echoed verbatim in the PONG; when a PONG arrives the
         // timestamp originated on our own clock, so the delta is the RTT.
-        if ptype == lanlink_proto::PING_PACKET_TYPE || ptype == lanlink_proto::PONG_PACKET_TYPE {
+        if ptype == lanlink_types::PING_PACKET_TYPE || ptype == lanlink_types::PONG_PACKET_TYPE {
             if inner.len() < PROBE_INNER_LEN {
                 return Err(SwitchError::Malformed("probe payload too short"));
             }
-            let ts = read_u64(&inner[lanlink_proto::NODE_ID_LEN + 8..PROBE_INNER_LEN]);
-            if ptype == lanlink_proto::PING_PACKET_TYPE {
+            let ts = read_u64(&inner[lanlink_types::NODE_ID_LEN + 8..PROBE_INNER_LEN]);
+            if ptype == lanlink_types::PING_PACKET_TYPE {
                 let pong = self.seal_pong(sender, ts)?;
-                return Ok(UdpOutcome::Reply(pong));
+                return Ok(InboundOutcome::Reply(pong));
             }
             let now_ms = self.probe_clock_ms();
             let rtt = Duration::from_millis(now_ms.saturating_sub(ts));
             if let Some(peer) = self.peers.get_mut(&sender) {
                 peer.rtt = Some(rtt);
             }
-            return Ok(UdpOutcome::Ignored);
+            return Ok(InboundOutcome::Ignored);
         }
 
         if inner.len() < INNER_HEADER_LEN {
@@ -793,11 +793,11 @@ impl Switch {
         }
 
         let frame_id =
-            read_u32(&inner[lanlink_proto::NODE_ID_LEN + 8..lanlink_proto::NODE_ID_LEN + 12]);
+            read_u32(&inner[lanlink_types::NODE_ID_LEN + 8..lanlink_types::NODE_ID_LEN + 12]);
         let chunk_idx =
-            read_u16(&inner[lanlink_proto::NODE_ID_LEN + 12..lanlink_proto::NODE_ID_LEN + 14]);
+            read_u16(&inner[lanlink_types::NODE_ID_LEN + 12..lanlink_types::NODE_ID_LEN + 14]);
         let total =
-            read_u16(&inner[lanlink_proto::NODE_ID_LEN + 14..lanlink_proto::NODE_ID_LEN + 16]);
+            read_u16(&inner[lanlink_types::NODE_ID_LEN + 14..lanlink_types::NODE_ID_LEN + 16]);
         let payload = &inner[INNER_HEADER_LEN..];
 
         let frame = if total <= 1 {
@@ -816,7 +816,7 @@ impl Switch {
 
             if entry.total != total {
                 tracing::debug!(?sender, frame_id, "fragment total mismatch; dropping");
-                return Ok(UdpOutcome::Ignored);
+                return Ok(InboundOutcome::Ignored);
             }
             if chunk_idx >= total {
                 return Err(SwitchError::Malformed("chunk index out of range"));
@@ -837,7 +837,7 @@ impl Switch {
                 assembled
             } else {
                 self.prune_if_needed();
-                return Ok(UdpOutcome::Ignored);
+                return Ok(InboundOutcome::Ignored);
             }
         };
 
@@ -847,7 +847,7 @@ impl Switch {
         }
 
         self.prune_if_needed();
-        Ok(UdpOutcome::Frame(frame))
+        Ok(InboundOutcome::Frame(frame))
     }
 
     fn next_frame_id(&mut self) -> u32 {
@@ -869,13 +869,13 @@ impl Switch {
 }
 
 fn build_handshake_packet(
-    receiver: lanlink_proto::NodeId,
-    sender: lanlink_proto::NodeId,
+    receiver: lanlink_types::NodeId,
+    sender: lanlink_types::NodeId,
     noise_msg: &[u8],
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + 2 * lanlink_proto::NODE_ID_LEN + noise_msg.len());
-    out.push(lanlink_proto::WIRE_PROTOCOL_VERSION);
-    out.push(lanlink_proto::NOISE_HANDSHAKE_PACKET_TYPE);
+    let mut out = Vec::with_capacity(4 + 2 * lanlink_types::NODE_ID_LEN + noise_msg.len());
+    out.push(lanlink_types::WIRE_PROTOCOL_VERSION);
+    out.push(lanlink_types::NOISE_HANDSHAKE_PACKET_TYPE);
     out.push(0x00);
     out.push(0x00);
     out.extend_from_slice(&receiver.0);
@@ -892,7 +892,7 @@ fn fragment(frame: &[u8], max_chunk: usize) -> Vec<Vec<u8>> {
 }
 
 fn build_inner(
-    sender: lanlink_proto::NodeId,
+    sender: lanlink_types::NodeId,
     counter: u64,
     frame_id: u32,
     chunk_idx: u16,
@@ -911,7 +911,7 @@ fn build_inner(
 
 /// Inner payload for keepalives and latency probes:
 /// `[sender id: 8][counter: 8][timestamp ms: 8]`.
-fn build_probe_inner(sender: lanlink_proto::NodeId, counter: u64, timestamp_ms: u64) -> Vec<u8> {
+fn build_probe_inner(sender: lanlink_types::NodeId, counter: u64, timestamp_ms: u64) -> Vec<u8> {
     let mut inner = Vec::with_capacity(PROBE_INNER_LEN);
     inner.extend_from_slice(&sender.0);
     inner.extend_from_slice(&counter.to_be_bytes());
@@ -956,7 +956,7 @@ mod table {
     /// A learned MAC entry.
     #[derive(Debug, Clone)]
     pub struct MacEntry {
-        pub peer: lanlink_proto::NodeId,
+        pub peer: lanlink_types::NodeId,
         pub last_seen: Instant,
     }
 
@@ -972,7 +972,7 @@ mod table {
         }
 
         /// Learn that `mac` was seen from `peer`.
-        pub fn learn(&mut self, mac: [u8; 6], peer: lanlink_proto::NodeId) {
+        pub fn learn(&mut self, mac: [u8; 6], peer: lanlink_types::NodeId) {
             self.table.insert(
                 mac,
                 MacEntry {
@@ -1023,10 +1023,10 @@ mod tests {
         lanlink_crypto::Identity::from_secret_bytes(bytes)
     }
 
-    fn node(id: u8) -> lanlink_proto::NodeId {
+    fn node(id: u8) -> lanlink_types::NodeId {
         let mut b = [0u8; 8];
         b[7] = id;
-        lanlink_proto::NodeId(b)
+        lanlink_types::NodeId(b)
     }
 
     fn eth_frame(src: u8, dst: u8, payload: &[u8]) -> Vec<u8> {
@@ -1095,8 +1095,11 @@ mod tests {
         let packets = a.on_tap_frame(&frame).unwrap();
         assert_eq!(packets.len(), 1);
 
-        let decoded = match b.on_packet(packets[0].addr, &packets[0].packet).unwrap() {
-            UdpOutcome::Frame(f) => f,
+        let decoded = match b
+            .on_inbound_packet(packets[0].addr, &packets[0].packet)
+            .unwrap()
+        {
+            InboundOutcome::Frame(f) => f,
             other => panic!("expected frame, got {other:?}"),
         };
         assert_eq!(decoded, frame);
@@ -1119,10 +1122,15 @@ mod tests {
         let packets = a.on_tap_frame(&frame).unwrap();
         assert_eq!(packets.len(), 2);
 
-        let first = b.on_packet(packets[0].addr, &packets[0].packet).unwrap();
-        assert!(matches!(first, UdpOutcome::Ignored));
-        let second = match b.on_packet(packets[1].addr, &packets[1].packet).unwrap() {
-            UdpOutcome::Frame(f) => f,
+        let first = b
+            .on_inbound_packet(packets[0].addr, &packets[0].packet)
+            .unwrap();
+        assert!(matches!(first, InboundOutcome::Ignored));
+        let second = match b
+            .on_inbound_packet(packets[1].addr, &packets[1].packet)
+            .unwrap()
+        {
+            InboundOutcome::Frame(f) => f,
             other => panic!("expected frame, got {other:?}"),
         };
         assert_eq!(second, frame);
@@ -1138,12 +1146,14 @@ mod tests {
         let frame = eth_frame(1, 2, &[0xcc; 50]);
         let packets = a.on_tap_frame(&frame).unwrap();
         assert!(matches!(
-            b.on_packet(packets[0].addr, &packets[0].packet).unwrap(),
-            UdpOutcome::Frame(_)
+            b.on_inbound_packet(packets[0].addr, &packets[0].packet)
+                .unwrap(),
+            InboundOutcome::Frame(_)
         ));
         assert!(matches!(
-            b.on_packet(packets[0].addr, &packets[0].packet).unwrap(),
-            UdpOutcome::Ignored
+            b.on_inbound_packet(packets[0].addr, &packets[0].packet)
+                .unwrap(),
+            InboundOutcome::Ignored
         ));
     }
 
@@ -1157,8 +1167,9 @@ mod tests {
         let frame = eth_frame(1, 2, &[0xdd; 50]);
         let packets = a.on_tap_frame(&frame).unwrap();
         assert!(matches!(
-            c.on_packet(packets[0].addr, &packets[0].packet).unwrap(),
-            UdpOutcome::Ignored
+            c.on_inbound_packet(packets[0].addr, &packets[0].packet)
+                .unwrap(),
+            InboundOutcome::Ignored
         ));
     }
 
@@ -1168,7 +1179,7 @@ mod tests {
         let relay_addr: SocketAddr = "203.0.113.50:3478".parse().unwrap();
         sw.sync_peers(&[lanlink_proto::PeerInfo {
             node_id: node(2),
-            virtual_ip: lanlink_proto::VirtualIp("26.0.0.2".parse().unwrap()),
+            virtual_ip: lanlink_types::VirtualIp("26.0.0.2".parse().unwrap()),
             public_key: vec![],
             direct_candidates: vec![],
             relay_candidates: vec![relay_addr],
@@ -1192,15 +1203,15 @@ mod tests {
 
         let ping = a.seal_ping(node(2), a.probe_clock_ms()).unwrap();
         // A's ping carries its own probe-clock timestamp; B echoes it back.
-        let pong = match b.on_packet(addr_a, &ping.packet).unwrap() {
-            UdpOutcome::Reply(p) => p,
+        let pong = match b.on_inbound_packet(addr_a, &ping.packet).unwrap() {
+            InboundOutcome::Reply(p) => p,
             other => panic!("expected reply, got {other:?}"),
         };
         // Simulate network delay so the RTT is measurable.
         std::thread::sleep(Duration::from_millis(15));
         assert!(matches!(
-            a.on_packet(addr_b, &pong).unwrap(),
-            UdpOutcome::Ignored
+            a.on_inbound_packet(addr_b, &pong).unwrap(),
+            InboundOutcome::Ignored
         ));
 
         let stats = a.peer_stats();
@@ -1224,8 +1235,8 @@ mod tests {
         let keep = b.seal_keepalive(node(1)).unwrap();
         // The keepalive arrives from a rebound source address.
         assert!(matches!(
-            a.on_packet(new_addr, &keep.packet).unwrap(),
-            UdpOutcome::Ignored
+            a.on_inbound_packet(new_addr, &keep.packet).unwrap(),
+            InboundOutcome::Ignored
         ));
 
         let stats = a.peer_stats();
@@ -1254,8 +1265,11 @@ mod tests {
             "tx side counts sealed bytes"
         );
 
-        match b.on_packet(packets[0].addr, &packets[0].packet).unwrap() {
-            UdpOutcome::Frame(_) => {}
+        match b
+            .on_inbound_packet(packets[0].addr, &packets[0].packet)
+            .unwrap()
+        {
+            InboundOutcome::Frame(_) => {}
             other => panic!("expected frame, got {other:?}"),
         }
         assert_eq!(b.peer_stats()[0].rx_bytes, packets[0].packet.len() as u64);
@@ -1272,15 +1286,15 @@ mod tests {
         // sealed after a ping must still pass the replay window.
         let ping = a.seal_ping(node(2), 0).unwrap();
         assert!(matches!(
-            b.on_packet(ping.addr, &ping.packet).unwrap(),
-            UdpOutcome::Reply(_)
+            b.on_inbound_packet(ping.addr, &ping.packet).unwrap(),
+            InboundOutcome::Reply(_)
         ));
 
         let frame = eth_frame(1, 2, &[0xff; 30]);
         let data = a.on_tap_frame(&frame).unwrap();
         assert!(matches!(
-            b.on_packet(data[0].addr, &data[0].packet).unwrap(),
-            UdpOutcome::Frame(_)
+            b.on_inbound_packet(data[0].addr, &data[0].packet).unwrap(),
+            InboundOutcome::Frame(_)
         ));
     }
 
@@ -1304,31 +1318,38 @@ mod tests {
         let m1 = a.initiate_handshake(node(2)).expect("initiate handshake");
 
         // B receives m1 and sends m2.
-        let m2 = match b.on_packet(m1.addr, &m1.packet).unwrap() {
-            UdpOutcome::HandshakeReply(m) => m,
+        let m2 = match b.on_inbound_packet(m1.addr, &m1.packet).unwrap() {
+            InboundOutcome::HandshakeReply(m) => m,
             other => panic!("expected handshake reply, got {other:?}"),
         };
 
         // A receives m2 and sends m3.
-        let m3 = match a.on_packet("10.0.0.2:9000".parse().unwrap(), &m2).unwrap() {
-            UdpOutcome::HandshakeReply(m) => m,
+        let m3 = match a
+            .on_inbound_packet("10.0.0.2:9000".parse().unwrap(), &m2)
+            .unwrap()
+        {
+            InboundOutcome::HandshakeReply(m) => m,
             other => panic!("expected handshake reply, got {other:?}"),
         };
 
         // B receives m3 and completes.
         assert!(matches!(
-            b.on_packet("10.0.0.1:9000".parse().unwrap(), &m3).unwrap(),
-            UdpOutcome::Ignored
+            b.on_inbound_packet("10.0.0.1:9000".parse().unwrap(), &m3)
+                .unwrap(),
+            InboundOutcome::Ignored
         ));
 
         // Data now uses Noise. A sealed with Noise because B had a session.
         let frame = eth_frame(1, 2, &[0xab; 80]);
         let packets = a.on_tap_frame(&frame).unwrap();
         assert_eq!(packets.len(), 1);
-        assert_eq!(packets[0].packet[2], lanlink_proto::FLAG_NOISE);
+        assert_eq!(packets[0].packet[2], lanlink_types::FLAG_NOISE);
 
-        let decoded = match b.on_packet(packets[0].addr, &packets[0].packet).unwrap() {
-            UdpOutcome::Frame(f) => f,
+        let decoded = match b
+            .on_inbound_packet(packets[0].addr, &packets[0].packet)
+            .unwrap()
+        {
+            InboundOutcome::Frame(f) => f,
             other => panic!("expected frame, got {other:?}"),
         };
         assert_eq!(decoded, frame);

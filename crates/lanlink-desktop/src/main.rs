@@ -110,8 +110,7 @@ fn build_tray(handle: &AppHandle) -> anyhow::Result<()> {
     // Some Tauri versions / platforms are sensitive to the separator type in
     // `Menu::with_items`. Use a plain menu without separators to maximize
     // compatibility.
-    let menu = Menu::with_items(handle, &[&show_i, &disconnect_i, &stop_i, &quit_i
-    ])?;
+    let menu = Menu::with_items(handle, &[&show_i, &disconnect_i, &stop_i, &quit_i])?;
 
     let icon = handle.default_window_icon().cloned();
     let mut builder = TrayIconBuilder::new()

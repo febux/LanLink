@@ -23,8 +23,9 @@ bind = "0.0.0.0:9000"
 # Virtual NIC name (must be unique per network on this node).
 tap = "lanlink0"
 
-# Virtual NIC MTU. 1400 leaves headroom for encryption + outer UDP/IP.
-mtu = 1400
+# Virtual NIC MTU. 1222 is the largest value that keeps a full Ethernet frame
+# inside one LanLink DATA packet; larger values trigger LanLink chunking.
+mtu = 1222
 
 # STUN servers used for NAT discovery. Empty = built-in defaults.
 stun_servers = []
