@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "coordinator"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2298,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "integration_tests"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2534,7 +2534,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-client"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "lanlink-proto",
@@ -2547,7 +2547,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-crypto"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "aead",
  "anyhow",
@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-desktop"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2586,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-firewall"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "thiserror 1.0.69",
  "tokio",
@@ -2595,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-gateway"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "lanlink-proto",
  "lanlink-types",
@@ -2606,7 +2606,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-gui"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2617,7 +2617,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-proto"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "lanlink-types",
  "serde",
@@ -2626,7 +2626,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-punch"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "if-addrs",
@@ -2645,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-relay"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-switch"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "lanlink-crypto",
  "lanlink-proto",
@@ -2673,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-tap"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2691,7 +2691,7 @@ dependencies = [
 
 [[package]]
 name = "lanlink-tui"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2708,14 +2708,14 @@ dependencies = [
 
 [[package]]
 name = "lanlink-types"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "lanlink-web"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2736,7 +2736,7 @@ dependencies = [
 
 [[package]]
 name = "lanlinkctl"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2753,7 +2753,7 @@ dependencies = [
 
 [[package]]
 name = "lanlinkd"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "chrono",
